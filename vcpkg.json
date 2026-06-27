@@ -1,0 +1,39 @@
+{
+  "name": "the-seed-engine",
+  "version": "13.1",
+  "description": "AAA MMORPG Engine - EditorFirst Runtime",
+  "dependencies": [
+    "glfw3",
+    "sqlite3",
+    "imgui",
+    "glad",
+    "glm",
+    {
+      "name": "vulkan",
+      "platform": "!osx"
+    }
+  ],
+  "overrides": [
+    {
+      "name": "glfw3",
+      "version": "3.4"
+    },
+    {
+      "name": "sqlite3",
+      "version": "3.45.0"
+    },
+    {
+      "name": "imgui",
+      "version": "1.90.6"
+    },
+    {
+      "name": "glad",
+      "version": "0.1.36"
+    },
+    {
+      "name": "glm",
+      "version": "1.0.1"
+    }
+  ],
+  "builtin-baseline": "2024.06.15"
+}
