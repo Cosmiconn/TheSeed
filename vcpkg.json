@@ -1,24 +1,17 @@
 {
   "name": "the-seed-engine",
-  "version": "13.2",
+  "version": "13.1",
+  "description": "C++23 MMORPG Engine V13.1",
   "dependencies": [
     "glfw3",
     "sqlite3",
     "imgui",
     "glm",
-    "glad",
-    {
-      "name": "imgui",
-      "features": ["glfw-binding", "opengl3-binding"]
-    },
     "vulkan",
     "vk-bootstrap",
+    "enet",
     "libsodium"
   ],
-  "features": {
-    "tests": {
-      "description": "Build unit tests",
-      "dependencies": ["gtest"]
-    }
-  }
+  "overrides": [],
+  "builtin-baseline": "2024.06.15"
 }
