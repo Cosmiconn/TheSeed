@@ -1,14 +1,15 @@
 // =============================================================================
 // network/ReliableUdp.cpp — Reliable UDP Implementation (AP-33)
 // =============================================================================
-#include "ReliableUdp.h"
-#include <algorithm>
+#include "network_ReliableUdp.h"
+#include "../core/Log.h"
 #include <cstring>
+#include <algorithm>
 
 namespace net {
 
 // =============================================================================
-// CRC32 Lookup Table
+// CRC32 (for packet integrity - lightweight)
 // =============================================================================
 static const uint32_t crc32Table[256] = {
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
@@ -56,580 +57,351 @@ static const uint32_t crc32Table[256] = {
     0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d
 };
 
-uint32_t ReliableUdp::CalculateCRC32(std::span<const uint8_t> data) {
+static uint32_t CRC32(std::span<const uint8_t> data) {
     uint32_t crc = 0xFFFFFFFF;
-    for (uint8_t byte : data) {
-        crc = crc32Table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
+    for (auto b : data) {
+        crc = crc32Table[(crc ^ b) & 0xFF] ^ (crc >> 8);
     }
     return crc ^ 0xFFFFFFFF;
 }
 
 // =============================================================================
-// Sequence Number Helpers
+// ReliableChannel Implementation
 // =============================================================================
+ReliableChannel::ReliableChannel(UdpSocket* sock, const Endpoint& remote) 
+    : socket(sock), remoteEndpoint(remote) {}
 
-bool ReliableUdp::IsNewer(uint16_t a, uint16_t b) {
-    return static_cast<int16_t>(a - b) > 0;
+void ReliableChannel::BindSocket(UdpSocket* sock, const Endpoint& remote) {
+    socket = sock;
+    remoteEndpoint = remote;
 }
 
-int ReliableUdp::SequenceDiff(uint16_t a, uint16_t b) {
-    return static_cast<int16_t>(a - b);
-}
+bool ReliableChannel::SendPacket(const PacketHeader& header, std::span<const uint8_t> payload) {
+    if (!socket || !socket->IsValid()) return false;
 
-// =============================================================================
-// Initialization
-// =============================================================================
-
-bool ReliableUdp::Initialize(uint16_t port) {
-    if (!socket.Bind(port)) {
-        return false;
-    }
-    if (!socket.SetNonBlocking()) {
-        Shutdown();
-        return false;
-    }
-    // Increase buffer sizes for high-throughput scenarios
-    socket.SetRecvBufferSize(2 * 1024 * 1024);  // 2MB
-    socket.SetSendBufferSize(2 * 1024 * 1024);  // 2MB
-    return true;
-}
-
-void ReliableUdp::Shutdown() {
-    std::lock_guard lock(sessionsMutex);
-    sessions.clear();
-    addressToSession.clear();
-    socket.Close();
-}
-
-// =============================================================================
-// Session Management
-// =============================================================================
-
-uint32_t ReliableUdp::CreateSession(const SocketAddress& address) {
-    std::lock_guard lock(sessionsMutex);
-
-    // Check if session already exists for this address
-    std::string addrKey = address.ToString();
-    auto it = addressToSession.find(addrKey);
-    if (it != addressToSession.end()) {
-        return it->second;
-    }
-
-    uint32_t sessionId = nextSessionId++;
-    auto now = std::chrono::steady_clock::now();
-
-    UdpSession session;
-    session.id = sessionId;
-    session.address = address;
-    session.lastRecvTime = now;
-    session.lastSendTime = now;
-    session.isConnected = true;
-
-    sessions[sessionId] = session;
-    addressToSession[addrKey] = sessionId;
-
-    if (onSessionConnected) {
-        onSessionConnected(sessionId);
-    }
-
-    return sessionId;
-}
-
-void ReliableUdp::DestroySession(uint32_t sessionId) {
-    std::lock_guard lock(sessionsMutex);
-
-    auto it = sessions.find(sessionId);
-    if (it == sessions.end()) return;
-
-    addressToSession.erase(it->second.address.ToString());
-    sessions.erase(it);
-
-    if (onSessionDisconnected) {
-        onSessionDisconnected(sessionId);
-    }
-}
-
-UdpSession* ReliableUdp::GetSession(uint32_t sessionId) {
-    std::lock_guard lock(sessionsMutex);
-    auto it = sessions.find(sessionId);
-    return it != sessions.end() ? &it->second : nullptr;
-}
-
-const UdpSession* ReliableUdp::GetSession(uint32_t sessionId) const {
-    std::lock_guard lock(sessionsMutex);
-    auto it = sessions.find(sessionId);
-    return it != sessions.end() ? &it->second : nullptr;
-}
-
-bool ReliableUdp::HasSession(const SocketAddress& address) const {
-    std::lock_guard lock(sessionsMutex);
-    return addressToSession.contains(address.ToString());
-}
-
-// =============================================================================
-// Send Operations
-// =============================================================================
-
-bool ReliableUdp::Send(uint32_t sessionId, std::span<const uint8_t> data, PacketFlags flags) {
-    if (HasFlag(flags, PacketFlags::Reliable)) {
-        return SendReliable(sessionId, data);
-    }
-    return SendUnreliable(sessionId, data);
-}
-
-bool ReliableUdp::SendUnreliable(uint32_t sessionId, std::span<const uint8_t> data) {
-    auto* session = GetSession(sessionId);
-    if (!session || !session->isConnected) return false;
-
-    if (data.size() > MAX_UDP_PAYLOAD) {
-        return SendFragmented(sessionId, data, PacketFlags::None);
-    }
-
-    auto packet = BuildPacket(sessionId, session->localSequence++, data, PacketFlags::None);
-    auto result = socket.SendTo(packet, session->address);
-
-    if (result) {
-        session->packetsSent++;
-        session->bytesSent += packet.size();
-        session->lastSendTime = std::chrono::steady_clock::now();
-        return true;
-    }
-    return false;
-}
-
-bool ReliableUdp::SendReliable(uint32_t sessionId, std::span<const uint8_t> data) {
-    auto* session = GetSession(sessionId);
-    if (!session || !session->isConnected) return false;
-
-    if (data.size() > MAX_UDP_PAYLOAD) {
-        return SendFragmented(sessionId, data, PacketFlags::Reliable);
-    }
-
-    uint16_t sequence = session->localSequence++;
-    auto packet = BuildPacket(sessionId, sequence, data, PacketFlags::Reliable);
-
-    // Store for potential resend
-    ReliableRecord record;
-    record.data.assign(packet.begin(), packet.end());
-    record.address = session->address;
-    record.sentTime = std::chrono::steady_clock::now();
-    record.sequence = sequence;
-
-    {
-        std::lock_guard lock(sessionsMutex);
-        session->sentReliable[sequence] = record;
-    }
-
-    auto result = socket.SendTo(packet, session->address);
-
-    if (result) {
-        session->packetsSent++;
-        session->bytesSent += packet.size();
-        session->lastSendTime = std::chrono::steady_clock::now();
-        return true;
-    }
-    return false;
-}
-
-void ReliableUdp::Broadcast(std::span<const uint8_t> data, PacketFlags flags, uint32_t exceptSessionId) {
-    std::lock_guard lock(sessionsMutex);
-
-    for (auto& [id, session] : sessions) {
-        if (id == exceptSessionId) continue;
-        if (!session.isConnected) continue;
-
-        // We can't lock here because Send might lock again - use try-lock or queue
-        // For simplicity, we'll send directly (potential deadlock if called from callback)
-        // In production, use a send queue
-    }
-}
-
-// =============================================================================
-// Receive
-// =============================================================================
-
-size_t ReliableUdp::Receive() {
-    alignas(alignof(UdpPacketHeader)) uint8_t buffer[MAX_PACKET_SIZE];
-    SocketAddress sender;
-    size_t processed = 0;
-
-    while (true) {
-        auto result = socket.RecvFrom(std::span(buffer, sizeof(buffer)), sender);
-        if (!result || *result == 0) break;
-
-        size_t received = *result;
-        if (received < sizeof(UdpPacketHeader) + 4) continue; // Too small
-
-        // Parse header
-        UdpPacketHeader header;
-        std::memcpy(&header, buffer, sizeof(header));
-
-        // Verify CRC32
-        uint32_t receivedCRC;
-        std::memcpy(&receivedCRC, buffer + sizeof(header), sizeof(receivedCRC));
-
-        uint32_t calculatedCRC = CalculateCRC32(std::span(buffer, sizeof(header)));
-        if (receivedCRC != calculatedCRC) continue; // CRC mismatch
-
-        // Extract payload
-        size_t payloadOffset = sizeof(header) + sizeof(receivedCRC);
-        std::span<uint8_t> payload(buffer + payloadOffset, header.payloadLength);
-
-        ProcessPacket(header, payload, sender);
-        processed++;
-    }
-
-    return processed;
-}
-
-// =============================================================================
-// Packet Processing
-// =============================================================================
-
-void ReliableUdp::ProcessPacket(const UdpPacketHeader& header, std::span<const uint8_t> payload,
-                                const SocketAddress& sender) {
-    uint32_t sessionId = header.sessionId;
-
-    // Handle connection request
-    if (HasFlag(static_cast<PacketFlags>(header.flags), PacketFlags::Connect)) {
-        ProcessConnect(sender, payload);
-        return;
-    }
-
-    // Find or create session
-    if (!HasSession(sender)) {
-        if (sessionId == 0) return; // Unknown session
-        // Could be NAT punchthrough - create session
-        sessionId = CreateSession(sender);
-    }
-
-    auto* session = GetSession(sessionId);
-    if (!session) return;
-
-    // Update timing
-    session->lastRecvTime = std::chrono::steady_clock::now();
-    session->packetsRecv++;
-    session->bytesRecv += sizeof(header) + payload.size();
-
-    // Process ACKs
-    if (header.ack != 0 || header.ackBits != 0) {
-        ProcessAck(sessionId, header.ack, header.ackBits);
-    }
-
-    // Handle disconnect
-    if (HasFlag(static_cast<PacketFlags>(header.flags), PacketFlags::Disconnect)) {
-        ProcessDisconnect(sessionId);
-        return;
-    }
-
-    // Handle heartbeat
-    if (HasFlag(static_cast<PacketFlags>(header.flags), PacketFlags::Heartbeat)) {
-        return; // Just updating lastRecvTime is enough
-    }
-
-    // Sequence validation for reliable packets
-    if (HasFlag(static_cast<PacketFlags>(header.flags), PacketFlags::Reliable)) {
-        uint16_t seq = header.sequence;
-
-        // Check if already received (deduplication)
-        bool alreadyReceived = false;
-        for (uint16_t receivedSeq : session->receivedReliable) {
-            if (receivedSeq == seq) {
-                alreadyReceived = true;
-                break;
-            }
-        }
-
-        if (alreadyReceived) {
-            // Send ACK again but don't process
-            return;
-        }
-
-        // Check if out of order
-        if (!IsNewer(seq, session->remoteSequence) && seq != session->remoteSequence) {
-            // Too old, ignore
-            return;
-        }
-
-        // Update received sequence
-        session->remoteSequence = seq;
-        session->receivedReliable.push_back(seq);
-        if (session->receivedReliable.size() > 64) {
-            session->receivedReliable.pop_front();
-        }
-    }
-
-    // Handle fragmentation
-    if (HasFlag(static_cast<PacketFlags>(header.flags), PacketFlags::Fragment)) {
-        // TODO: Reassemble fragments
-        // For now, just pass through
-    }
-
-    // Deliver to application
-    if (onPacketReceived) {
-        onPacketReceived(sessionId, payload);
-    }
-}
-
-void ReliableUdp::ProcessAck(uint32_t sessionId, uint16_t ack, uint32_t ackBits) {
-    auto* session = GetSession(sessionId);
-    if (!session) return;
-
-    auto now = std::chrono::steady_clock::now();
-
-    // Process explicit ACK
-    auto it = session->sentReliable.find(ack);
-    if (it != session->sentReliable.end() && !it->second.acked) {
-        it->second.acked = true;
-
-        // Update RTT
-        float rtt = std::chrono::duration<float>(now - it->second.sentTime).count();
-        session->smoothedRTT = 0.875f * session->smoothedRTT + 0.125f * rtt;
-        session->rttVariance = 0.875f * session->rttVariance + 0.125f * std::abs(rtt - session->smoothedRTT);
-
-        if (onRttUpdated) {
-            onRttUpdated(sessionId, session->smoothedRTT);
-        }
-    }
-
-    // Process ACK bitfield (32 previous packets)
-    for (int i = 0; i < 32; ++i) {
-        if ((ackBits >> i) & 1) {
-            uint16_t ackedSeq = ack - i - 1;
-            auto bitIt = session->sentReliable.find(ackedSeq);
-            if (bitIt != session->sentReliable.end()) {
-                bitIt->second.acked = true;
-            }
-        }
-    }
-
-    // Remove acked packets
-    for (auto it = session->sentReliable.begin(); it != session->sentReliable.end();) {
-        if (it->second.acked) {
-            it = session->sentReliable.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void ReliableUdp::ProcessConnect(const SocketAddress& sender, std::span<const uint8_t> payload) {
-    uint32_t sessionId = CreateSession(sender);
-
-    // Send connection accepted
-    auto* session = GetSession(sessionId);
-    if (session) {
-        uint8_t acceptData[4];
-        std::memcpy(acceptData, &sessionId, sizeof(sessionId));
-        SendReliable(sessionId, std::span(acceptData, sizeof(acceptData)));
-    }
-}
-
-void ReliableUdp::ProcessDisconnect(uint32_t sessionId) {
-    DestroySession(sessionId);
-}
-
-// =============================================================================
-// Packet Building
-// =============================================================================
-
-std::vector<uint8_t> ReliableUdp::BuildPacket(uint32_t sessionId, uint16_t sequence,
-                                               std::span<const uint8_t> payload,
-                                               PacketFlags flags) {
     std::vector<uint8_t> packet;
-    packet.reserve(sizeof(UdpPacketHeader) + 4 + payload.size());
+    packet.reserve(sizeof(PacketHeader) + payload.size() + 4); // +4 for CRC
 
-    auto* session = GetSession(sessionId);
-
-    UdpPacketHeader header{};
-    header.sessionId = sessionId;
-    header.sequence = sequence;
-    header.flags = static_cast<uint16_t>(flags);
-    header.payloadLength = static_cast<uint16_t>(payload.size());
-
-    if (session) {
-        header.ack = session->remoteSequence;
-        // Build ACK bitfield
-        header.ackBits = 0;
-        for (int i = 0; i < 32; ++i) {
-            uint16_t checkSeq = session->remoteSequence - i - 1;
-            for (uint16_t received : session->receivedReliable) {
-                if (received == checkSeq) {
-                    header.ackBits |= (1 << i);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Append header
+    // Serialize header
     packet.insert(packet.end(), 
-                  reinterpret_cast<uint8_t*>(&header),
-                  reinterpret_cast<uint8_t*>(&header) + sizeof(header));
-
-    // Append CRC32 placeholder (will be calculated)
-    uint32_t crc = CalculateCRC32(std::span(packet.data(), packet.size()));
-    packet.insert(packet.end(), 
-                  reinterpret_cast<uint8_t*>(&crc),
-                  reinterpret_cast<uint8_t*>(&crc) + sizeof(crc));
+        reinterpret_cast<const uint8_t*>(&header),
+        reinterpret_cast<const uint8_t*>(&header) + sizeof(PacketHeader));
 
     // Append payload
-    packet.insert(packet.end(), payload.begin(), payload.end());
-
-    return packet;
-}
-
-// =============================================================================
-// Update (Resends, Heartbeats, Timeouts)
-// =============================================================================
-
-void ReliableUdp::Update(float deltaTime) {
-    std::lock_guard lock(sessionsMutex);
-    auto now = std::chrono::steady_clock::now();
-
-    for (auto it = sessions.begin(); it != sessions.end();) {
-        auto& session = it->second;
-
-        // Check timeout
-        if (session.IsTimedOut()) {
-            auto sessionId = it->first;
-            it = sessions.erase(it);
-            addressToSession.erase(session.address.ToString());
-
-            if (onSessionDisconnected) {
-                onSessionDisconnected(sessionId);
-            }
-            continue;
-        }
-
-        // Resend pending reliable packets
-        for (auto& [seq, record] : session.sentReliable) {
-            if (record.acked) continue;
-
-            float elapsed = std::chrono::duration<float>(now - record.sentTime).count();
-            float timeout = session.smoothedRTT + 4.0f * session.rttVariance;
-
-            if (elapsed > timeout) {
-                if (record.retryCount >= maxRetries) {
-                    // Too many retries, consider dead
-                    session.packetsLost++;
-                    record.acked = true; // Stop retrying
-                } else {
-                    // Resend
-                    socket.SendTo(record.data, record.address);
-                    record.sentTime = now;
-                    record.retryCount++;
-                    session.packetsSent++;
-                }
-            }
-        }
-
-        // Send heartbeat if needed
-        if (session.NeedsHeartbeat()) {
-            SendHeartbeat(it->first);
-        }
-
-        ++it;
+    if (!payload.empty()) {
+        packet.insert(packet.end(), payload.begin(), payload.end());
     }
+
+    // Append CRC32
+    uint32_t crc = CRC32(std::span(packet.data(), packet.size()));
+    packet.push_back(static_cast<uint8_t>(crc & 0xFF));
+    packet.push_back(static_cast<uint8_t>((crc >> 8) & 0xFF));
+    packet.push_back(static_cast<uint8_t>((crc >> 16) & 0xFF));
+    packet.push_back(static_cast<uint8_t>((crc >> 24) & 0xFF));
+
+    auto sent = socket->SendTo(packet, remoteEndpoint);
+    if (sent && *sent > 0) {
+        stats.packetsSent++;
+        stats.bytesSent += *sent;
+        return true;
+    }
+    return false;
 }
 
-void ReliableUdp::ResendPending(uint32_t sessionId) {
-    auto* session = GetSession(sessionId);
-    if (!session) return;
+bool ReliableChannel::SendUnreliable(std::span<const uint8_t> payload) {
+    if (payload.size() > MAX_PACKET_SIZE - sizeof(PacketHeader) - 4) {
+        AddLog("[ReliableUdp] Payload too large for unreliable send: {}", payload.size());
+        return false;
+    }
 
-    auto now = std::chrono::steady_clock::now();
+    PacketHeader header;
+    header.sequence = localSequence++;
+    header.ack = remoteSequence;
+    header.ackBitmap = remoteAckBitmap;
+    header.payloadLen = static_cast<uint16_t>(payload.size());
 
-    for (auto& [seq, record] : session->sentReliable) {
-        if (record.acked) continue;
+    return SendPacket(header, payload);
+}
 
-        float elapsed = std::chrono::duration<float>(now - record.sentTime).count();
-        if (elapsed > resendTimeout) {
-            socket.SendTo(record.data, record.address);
-            record.sentTime = now;
-            record.retryCount++;
+bool ReliableChannel::SendReliable(std::span<const uint8_t> payload) {
+    // Fragment if necessary
+    if (payload.size() > MAX_FRAGMENT_SIZE) {
+        size_t totalFragments = (payload.size() + MAX_FRAGMENT_SIZE - 1) / MAX_FRAGMENT_SIZE;
+        if (totalFragments > MAX_FRAGMENTS) {
+            AddLog("[ReliableUdp] Payload exceeds max fragment count");
+            return false;
+        }
+
+        uint16_t baseSequence = localSequence;
+        for (size_t i = 0; i < totalFragments; ++i) {
+            size_t offset = i * MAX_FRAGMENT_SIZE;
+            size_t fragSize = std::min(MAX_FRAGMENT_SIZE, payload.size() - offset);
+
+            PacketHeader header;
+            header.sequence = localSequence++;
+            header.ack = remoteSequence;
+            header.ackBitmap = remoteAckBitmap;
+            header.payloadLen = static_cast<uint16_t>(fragSize);
+            header.flags = PacketHeader::FLAG_RELIABLE | PacketHeader::FLAG_FRAGMENT;
+            header.fragmentId = static_cast<uint16_t>(i);
+            header.fragmentCount = static_cast<uint16_t>(totalFragments);
+
+            auto fragPayload = payload.subspan(offset, fragSize);
+
+            // Queue for retransmission
+            PacketRecord rec;
+            rec.data.assign(fragPayload.begin(), fragPayload.end());
+            rec.sequence = header.sequence;
+            rec.sendTime = std::chrono::steady_clock::now();
+            rec.destination = remoteEndpoint;
+            sendQueue.push_back(std::move(rec));
+
+            sendTimes[header.sequence] = rec.sendTime;
+            SendPacket(header, fragPayload);
+        }
+        return true;
+    }
+
+    // Single packet
+    PacketHeader header;
+    header.sequence = localSequence++;
+    header.ack = remoteSequence;
+    header.ackBitmap = remoteAckBitmap;
+    header.payloadLen = static_cast<uint16_t>(payload.size());
+    header.flags = PacketHeader::FLAG_RELIABLE;
+
+    PacketRecord rec;
+    rec.data.assign(payload.begin(), payload.end());
+    rec.sequence = header.sequence;
+    rec.sendTime = std::chrono::steady_clock::now();
+    rec.destination = remoteEndpoint;
+    sendQueue.push_back(std::move(rec));
+
+    sendTimes[header.sequence] = rec.sendTime;
+    return SendPacket(header, payload);
+}
+
+void ReliableChannel::SendAck() {
+    PacketHeader header;
+    header.sequence = localSequence++;
+    header.ack = remoteSequence;
+    header.ackBitmap = remoteAckBitmap;
+    header.payloadLen = 0;
+    header.flags = PacketHeader::FLAG_ACK_ONLY;
+    SendPacket(header, {});
+}
+
+bool ReliableChannel::ProcessIncoming(std::span<const uint8_t> rawPacket, const Endpoint& sender) {
+    if (rawPacket.size() < sizeof(PacketHeader) + 4) return false;
+
+    // Verify CRC
+    size_t crcOffset = rawPacket.size() - 4;
+    uint32_t receivedCrc = 
+        (static_cast<uint32_t>(rawPacket[crcOffset])) |
+        (static_cast<uint32_t>(rawPacket[crcOffset + 1]) << 8) |
+        (static_cast<uint32_t>(rawPacket[crcOffset + 2]) << 16) |
+        (static_cast<uint32_t>(rawPacket[crcOffset + 3]) << 24);
+
+    uint32_t computedCrc = CRC32(rawPacket.subspan(0, crcOffset));
+    if (receivedCrc != computedCrc) {
+        stats.packetsLost++;
+        return false;
+    }
+
+    // Parse header
+    PacketHeader header;
+    std::memcpy(&header, rawPacket.data(), sizeof(PacketHeader));
+
+    if (header.protocolId != PROTOCOL_ID) return false;
+
+    stats.packetsRecv++;
+    stats.bytesRecv += rawPacket.size();
+
+    // Update remote sequence tracking
+    if (header.sequence > remoteSequence || remoteSequence == 0) {
+        uint16_t diff = header.sequence - remoteSequence;
+        if (diff < SACK_BITMAP_BITS) {
+            remoteAckBitmap <<= diff;
+            remoteAckBitmap |= 1; // Set bit 0 for the previous remoteSequence
+        } else {
+            remoteAckBitmap = 0;
+        }
+        remoteSequence = header.sequence;
+    } else {
+        uint16_t diff = remoteSequence - header.sequence;
+        if (diff < SACK_BITMAP_BITS) {
+            remoteAckBitmap |= (1u << diff);
         }
     }
-}
 
-void ReliableUdp::SendHeartbeat(uint32_t sessionId) {
-    auto* session = GetSession(sessionId);
-    if (!session) return;
+    // Process ACKs from remote
+    uint16_t ack = header.ack;
+    uint32_t ackBits = header.ackBitmap;
 
-    uint8_t heartbeatData = 0;
-    auto packet = BuildPacket(sessionId, session->localSequence++, 
-                              std::span(&heartbeatData, 1), 
-                              PacketFlags::Heartbeat);
-    socket.SendTo(packet, session->address);
-    session->lastSendTime = std::chrono::steady_clock::now();
-}
+    // ACK direct
+    auto it = std::ranges::find_if(sendQueue, [ack](const PacketRecord& r) { return r.sequence == ack; });
+    if (it != sendQueue.end() && !it->acked) {
+        it->acked = true;
+        stats.packetsAcked++;
+        UpdateRtt(ack);
+    }
 
-// =============================================================================
-// Fragmentation
-// =============================================================================
+    // ACK via bitmap (SACK)
+    for (int i = 0; i < SACK_BITMAP_BITS; ++i) {
+        if (ackBits & (1u << i)) {
+            uint16_t seq = ack - (i + 1);
+            auto sackIt = std::ranges::find_if(sendQueue, [seq](const PacketRecord& r) { return r.sequence == seq; });
+            if (sackIt != sendQueue.end() && !sackIt->acked) {
+                sackIt->acked = true;
+                stats.packetsAcked++;
+                UpdateRtt(seq);
+            }
+        }
+    }
 
-bool ReliableUdp::SendFragmented(uint32_t sessionId, std::span<const uint8_t> data,
-                                  PacketFlags flags) {
-    auto* session = GetSession(sessionId);
-    if (!session || !session->isConnected) return false;
+    // Remove acked packets from queue
+    std::erase_if(sendQueue, [](const PacketRecord& r) { return r.acked; });
 
-    size_t fragmentSize = MAX_UDP_PAYLOAD;
-    size_t totalFragments = (data.size() + fragmentSize - 1) / fragmentSize;
+    // Handle payload
+    if (header.payloadLen > 0) {
+        size_t payloadOffset = sizeof(PacketHeader);
+        auto payload = rawPacket.subspan(payloadOffset, header.payloadLen);
 
-    if (totalFragments > 65535) return false; // Too large
+        if (header.flags & PacketHeader::FLAG_FRAGMENT) {
+            // Store fragment
+            auto& fb = fragmentBuffers[header.sequence - header.fragmentId];
+            if (fb.fragments.empty()) {
+                fb.fragmentCount = header.fragmentCount;
+                fb.fragments.resize(header.fragmentCount);
+                fb.firstFragmentTime = std::chrono::steady_clock::now();
+            }
+            if (header.fragmentId < fb.fragmentCount) {
+                fb.fragments[header.fragmentId].assign(payload.begin(), payload.end());
+                fb.receivedCount++;
+            }
+        } else {
+            // Complete packet
+            PacketRecord rec;
+            rec.data.assign(payload.begin(), payload.end());
+            rec.sequence = header.sequence;
+            recvQueue.push_back(std::move(rec));
+        }
+    }
 
-    for (size_t i = 0; i < totalFragments; ++i) {
-        size_t offset = i * fragmentSize;
-        size_t size = std::min(fragmentSize, data.size() - offset);
-
-        std::span<const uint8_t> fragment(data.data() + offset, size);
-
-        UdpPacketHeader header{};
-        header.sessionId = sessionId;
-        header.sequence = session->localSequence++;
-        header.flags = static_cast<uint16_t>(flags | PacketFlags::Fragment);
-        header.fragmentId = static_cast<uint16_t>(i);
-        header.fragmentCount = static_cast<uint16_t>(totalFragments);
-        header.payloadLength = static_cast<uint16_t>(size);
-
-        std::vector<uint8_t> packet;
-        packet.insert(packet.end(), 
-                      reinterpret_cast<uint8_t*>(&header),
-                      reinterpret_cast<uint8_t*>(&header) + sizeof(header));
-
-        uint32_t crc = CalculateCRC32(std::span(packet.data(), packet.size()));
-        packet.insert(packet.end(), 
-                      reinterpret_cast<uint8_t*>(&crc),
-                      reinterpret_cast<uint8_t*>(&crc) + sizeof(crc));
-
-        packet.insert(packet.end(), fragment.begin(), fragment.end());
-
-        auto result = socket.SendTo(packet, session->address);
-        if (!result) return false;
+    // Send ACK if this was a reliable packet
+    if (header.flags & PacketHeader::FLAG_RELIABLE) {
+        SendAck();
     }
 
     return true;
 }
 
-// =============================================================================
-// Statistics
-// =============================================================================
+std::optional<std::vector<uint8_t>> ReliableChannel::PopMessage() {
+    // Check for completed fragments first
+    for (auto it = fragmentBuffers.begin(); it != fragmentBuffers.end();) {
+        if (it->second.receivedCount == it->second.fragmentCount && it->second.fragmentCount > 0) {
+            std::vector<uint8_t> assembled;
+            for (const auto& frag : it->second.fragments) {
+                assembled.insert(assembled.end(), frag.begin(), frag.end());
+            }
+            it = fragmentBuffers.erase(it);
+            return assembled;
+        }
+        ++it;
+    }
 
-size_t ReliableUdp::GetSessionCount() const {
-    std::lock_guard lock(sessionsMutex);
-    return sessions.size();
+    // Return next in-order reliable packet
+    if (!recvQueue.empty()) {
+        auto rec = std::move(recvQueue.front());
+        recvQueue.pop_front();
+        return rec.data;
+    }
+
+    return std::nullopt;
 }
 
-void ReliableUdp::GetStatistics(uint64_t& outSent, uint64_t& outRecv, uint64_t& outLost) const {
-    std::lock_guard lock(sessionsMutex);
-    outSent = 0;
-    outRecv = 0;
-    outLost = 0;
+void ReliableChannel::Update(float deltaTime) {
+    auto now = std::chrono::steady_clock::now();
+    float rttTimeout = stats.smoothedRtt * timeoutMultiplier;
 
-    for (const auto& [id, session] : sessions) {
-        outSent += session.packetsSent;
-        outRecv += session.packetsRecv;
-        outLost += session.packetsLost;
+    // Retransmit unacked packets
+    for (auto& rec : sendQueue) {
+        if (rec.acked) continue;
+
+        float elapsed = std::chrono::duration<float>(now - rec.sendTime).count();
+        if (elapsed > rttTimeout && rec.retryCount < maxRetries) {
+            PacketHeader header;
+            header.sequence = rec.sequence;
+            header.ack = remoteSequence;
+            header.ackBitmap = remoteAckBitmap;
+            header.payloadLen = static_cast<uint16_t>(rec.data.size());
+            header.flags = PacketHeader::FLAG_RELIABLE;
+
+            SendPacket(header, rec.data);
+            rec.sendTime = now;
+            rec.retryCount++;
+        } else if (rec.retryCount >= maxRetries) {
+            AddLog("[ReliableUdp] Packet {} exceeded max retries", rec.sequence);
+            rec.acked = true; // Drop it
+            stats.packetsLost++;
+        }
     }
+
+    // Cleanup old fragments
+    CleanupFragments();
+
+    // Calculate packet loss rate
+    if (stats.packetsSent > 0) {
+        stats.packetLossRate = static_cast<float>(stats.packetsLost) / static_cast<float>(stats.packetsSent);
+    }
+}
+
+void ReliableChannel::UpdateRtt(uint16_t ackedSequence) {
+    auto it = sendTimes.find(ackedSequence);
+    if (it == sendTimes.end()) return;
+
+    auto now = std::chrono::steady_clock::now();
+    float rtt = std::chrono::duration<float>(now - it->second).count();
+    sendTimes.erase(it);
+
+    // Jacobson/Karn RTT estimation
+    if (stats.smoothedRtt == DEFAULT_RTT) {
+        stats.smoothedRtt = rtt;
+        stats.rttVariance = rtt / 2.0f;
+    } else {
+        float diff = rtt - stats.smoothedRtt;
+        stats.smoothedRtt += RTT_ALPHA * diff;
+        stats.rttVariance += RTT_BETA * (std::abs(diff) - stats.rttVariance);
+    }
+}
+
+void ReliableChannel::Retransmit(uint16_t sequence) {
+    auto it = std::ranges::find_if(sendQueue, [sequence](const PacketRecord& r) { 
+        return r.sequence == sequence; 
+    });
+    if (it != sendQueue.end() && !it->acked) {
+        PacketHeader header;
+        header.sequence = it->sequence;
+        header.ack = remoteSequence;
+        header.ackBitmap = remoteAckBitmap;
+        header.payloadLen = static_cast<uint16_t>(it->data.size());
+        header.flags = PacketHeader::FLAG_RELIABLE;
+        SendPacket(header, it->data);
+        it->sendTime = std::chrono::steady_clock::now();
+        it->retryCount++;
+    }
+}
+
+void ReliableChannel::CleanupFragments() {
+    auto now = std::chrono::steady_clock::now();
+    std::erase_if(fragmentBuffers, [&now, this](const auto& pair) {
+        float age = std::chrono::duration<float>(now - pair.second.firstFragmentTime).count();
+        if (age > fragmentTimeout) {
+            this->stats.packetsLost += (pair.second.fragmentCount - pair.second.receivedCount);
+            return true;
+        }
+        return false;
+    });
 }
 
 } // namespace net

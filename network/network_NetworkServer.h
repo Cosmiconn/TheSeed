@@ -1,95 +1,118 @@
 #pragma once
 // =============================================================================
-// network/NetworkServer.h — High-Level UDP Server Interface (AP-34/AP-36)
-// Replaces legacy TCP server with UDP+Reliability
+// network/NetworkServer.h — High-Level Network Server (AP-32 + AP-33)
+// Replaces server/Network.cpp TCP blocking with UDP + reliability
 // =============================================================================
-#include "ReliableUdp.h"
-#include "../core/ByteBuffer.h"
-#include <thread>
-#include <atomic>
-#include <functional>
+#include "network_UdpSocket.h"
+#include "network_ReliableUdp.h"
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <memory>
+#include <mutex>
 #include <span>
 
 namespace net {
 
-// =============================================================================
-// CLIENT SESSION (UDP version)
-// =============================================================================
-struct UdpClientSession {
-    uint32_t sessionId = 0;
-    uint32_t entityId = 0;
-    bool isGM = false;
+struct ClientConnection {
+    uint32_t clientId = 0;
+    Endpoint endpoint;
+    std::unique_ptr<ReliableChannel> channel;
+    std::chrono::steady_clock::time_point lastRecvTime;
     bool isAuthenticated = false;
-    std::vector<uint8_t> recvBuffer;
-    std::set<uint32_t> knownEntities;
+    std::string username;
 
-    // For interest management
-    float lastPosX = 0.0f;
-    float lastPosZ = 0.0f;
-
-    // Statistics
-    float pingMs = 0.0f;
-    uint64_t bytesRecv = 0;
+    // Stats
     uint64_t bytesSent = 0;
+    uint64_t bytesRecv = 0;
+    uint32_t packetsSent = 0;
+    uint32_t packetsRecv = 0;
 };
 
-// =============================================================================
-// NETWORK SERVER
-// =============================================================================
 class NetworkServer {
-    ReliableUdp reliableUdp;
-    std::map<uint32_t, UdpClientSession> clientSessions;
-    std::mutex sessionsMutex;
+public:
+    using PacketHandler = std::function<void(uint32_t clientId, std::span<const uint8_t> payload)>;
+    using ConnectHandler = std::function<void(uint32_t clientId)>;
+    using DisconnectHandler = std::function<void(uint32_t clientId)>;
 
-    std::atomic<bool> isRunning{false};
-    std::thread recvThread;
-    std::thread updateThread;
+private:
+    UdpSocket socket;
+    uint16_t port = 0;
+    bool running = false;
 
-    uint16_t listenPort = 54000;
-    float tickRate = 60.0f; // Updates per second
+    std::unordered_map<uint32_t, ClientConnection> clients;
+    std::unordered_map<std::string, uint32_t> endpointToClientId;
+    uint32_t nextClientId = 1;
+
+    std::mutex clientsMutex;
+
+    // Handlers
+    PacketHandler packetHandler;
+    ConnectHandler connectHandler;
+    DisconnectHandler disconnectHandler;
+
+    // Config
+    float clientTimeout = 30.0f;  // Seconds
+    size_t maxClients = 1000;
 
 public:
     NetworkServer() = default;
     ~NetworkServer() { Shutdown(); }
 
-    NetworkServer(const NetworkServer&) = delete;
-    NetworkServer& operator=(const NetworkServer&) = delete;
-
+    // ===================================================================
     // Lifecycle
-    [[nodiscard]] bool Startup(uint16_t port);
+    // ===================================================================
+    [[nodiscard]] bool Startup(uint16_t listenPort, size_t maxClients = 1000);
     void Shutdown();
-    [[nodiscard]] bool IsRunning() const noexcept { return isRunning; }
+    [[nodiscard]] bool IsRunning() const { return running; }
 
-    // Send operations
-    void SendTo(uint32_t sessionId, std::span<const uint8_t> data, bool reliable = false);
-    void Broadcast(std::span<const uint8_t> data, bool reliable = false, uint32_t exceptSessionId = 0);
-    void BroadcastToArea(float centerX, float centerZ, float radius, 
-                         std::span<const uint8_t> data, bool reliable = false);
+    // ===================================================================
+    // Handlers
+    // ===================================================================
+    void SetPacketHandler(PacketHandler handler) { packetHandler = std::move(handler); }
+    void SetConnectHandler(ConnectHandler handler) { connectHandler = std::move(handler); }
+    void SetDisconnectHandler(DisconnectHandler handler) { disconnectHandler = std::move(handler); }
 
-    // Session management
-    [[nodiscard]] bool HasSession(uint32_t sessionId) const;
-    [[nodiscard]] size_t GetSessionCount() const;
-    [[nodiscard]] UdpClientSession* GetSession(uint32_t sessionId);
-    void DisconnectSession(uint32_t sessionId);
+    // ===================================================================
+    // I/O
+    // ===================================================================
+    // Poll for incoming packets (non-blocking, call every tick)
+    void Poll();
 
-    // Statistics
-    [[nodiscard]] float GetAveragePing() const;
-    void PrintStatistics() const;
+    // Send to specific client
+    [[nodiscard]] bool SendToClient(uint32_t clientId, std::span<const uint8_t> payload, bool reliable = true);
 
-    // Callbacks (set before Startup)
-    std::function<void(uint32_t sessionId, std::span<const uint8_t> data)> onPacketReceived;
-    std::function<void(uint32_t sessionId)> onClientConnected;
-    std::function<void(uint32_t sessionId)> onClientDisconnected;
+    // Broadcast to all clients
+    void Broadcast(std::span<const uint8_t> payload, bool reliable = true);
+
+    // Broadcast to all except one
+    void BroadcastExcept(uint32_t excludeClientId, std::span<const uint8_t> payload, bool reliable = true);
+
+    // ===================================================================
+    // Client Management
+    // ===================================================================
+    void DisconnectClient(uint32_t clientId);
+    [[nodiscard]] bool IsClientConnected(uint32_t clientId) const;
+    [[nodiscard]] size_t GetClientCount() const;
+
+    // ===================================================================
+    // Stats
+    // ===================================================================
+    struct ServerStats {
+        uint64_t totalBytesSent = 0;
+        uint64_t totalBytesRecv = 0;
+        uint64_t totalPacketsSent = 0;
+        uint64_t totalPacketsRecv = 0;
+        float averageRtt = 0.0f;
+        float packetLossRate = 0.0f;
+    };
+    [[nodiscard]] ServerStats GetStats() const;
 
 private:
-    void ReceiveLoop();
-    void UpdateLoop();
-    void HandlePacket(uint32_t sessionId, std::span<const uint8_t> data);
-    void HandleConnect(uint32_t sessionId);
-    void HandleDisconnect(uint32_t sessionId);
+    [[nodiscard]] uint32_t GetOrCreateClientId(const Endpoint& endpoint);
+    void RemoveClient(uint32_t clientId);
+    void CleanupTimedOutClients();
 };
-
-// Global instance (replaces legacy server globals)
-inline NetworkServer gNetworkServer;
 
 } // namespace net

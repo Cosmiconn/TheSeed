@@ -1,264 +1,327 @@
 // =============================================================================
-// network/NetworkServer.cpp — UDP Server Implementation (AP-34/AP-36)
+// network/NetworkServer.cpp — UDP Server Implementation (AP-32 + AP-33)
 // =============================================================================
-#include "NetworkServer.h"
+#include "network_NetworkServer.h"
 #include "../core/Log.h"
-#include <chrono>
-#include <format>
+#include <cstring>
 
 namespace net {
 
-// =============================================================================
-// Lifecycle
-// =============================================================================
+bool NetworkServer::Startup(uint16_t listenPort, size_t maxCli) {
+    maxClients = maxCli;
+    port = listenPort;
 
-bool NetworkServer::Startup(uint16_t port) {
-    if (isRunning) return false;
-
-    listenPort = port;
-
-    if (!NetworkInit()) {
-        AddLog("[Net] Failed to initialize network subsystem");
+    if (!socket.Create(true)) {  // IPv6 dual-stack
+        AddLog("[NetworkServer] Failed to create socket");
         return false;
     }
 
-    if (!reliableUdp.Initialize(port)) {
-        AddLog("[Net] Failed to bind UDP socket to port {}", port);
-        NetworkShutdown();
+    if (!socket.SetNonBlocking(true)) {
+        AddLog("[NetworkServer] Failed to set non-blocking");
         return false;
     }
 
-    // Setup callbacks
-    reliableUdp.onPacketReceived = [this](uint32_t sessionId, std::span<const uint8_t> data) {
-        HandlePacket(sessionId, data);
-    };
+    if (!socket.SetReuseAddr(true)) {
+        AddLog("[NetworkServer] Failed to set reuse addr");
+    }
 
-    reliableUdp.onSessionConnected = [this](uint32_t sessionId) {
-        HandleConnect(sessionId);
-    };
+    // Large buffers for MMORPG scale
+    socket.SetRecvBufferSize(4 * 1024 * 1024);   // 4MB
+    socket.SetSendBufferSize(4 * 1024 * 1024);  // 4MB
 
-    reliableUdp.onSessionDisconnected = [this](uint32_t sessionId) {
-        HandleDisconnect(sessionId);
-    };
+    Endpoint bindEp = Endpoint::Any(listenPort, true);
+    if (!socket.Bind(bindEp)) {
+        AddLog("[NetworkServer] Failed to bind to port {}", listenPort);
+        return false;
+    }
 
-    reliableUdp.onRttUpdated = [this](uint32_t sessionId, float rtt) {
-        std::lock_guard lock(sessionsMutex);
-        auto it = clientSessions.find(sessionId);
-        if (it != clientSessions.end()) {
-            it->second.pingMs = rtt * 1000.0f;
-        }
-    };
-
-    isRunning = true;
-
-    // Start threads
-    recvThread = std::thread([this]() { ReceiveLoop(); });
-    updateThread = std::thread([this]() { UpdateLoop(); });
-
-    AddLog("[Net] UDP server started on port {}", port);
+    running = true;
+    AddLog("[NetworkServer] Listening on UDP port {} (max clients: {})", listenPort, maxClients);
     return true;
 }
 
 void NetworkServer::Shutdown() {
-    if (!isRunning) return;
+    running = false;
 
-    isRunning = false;
-
-    if (recvThread.joinable()) recvThread.join();
-    if (updateThread.joinable()) updateThread.join();
-
-    reliableUdp.Shutdown();
-    NetworkShutdown();
-
-    std::lock_guard lock(sessionsMutex);
-    clientSessions.clear();
-
-    AddLog("[Net] UDP server shutdown complete");
-}
-
-// =============================================================================
-// Send Operations
-// =============================================================================
-
-void NetworkServer::SendTo(uint32_t sessionId, std::span<const uint8_t> data, bool reliable) {
-    if (!isRunning) return;
-
-    auto flags = reliable ? PacketFlags::Reliable : PacketFlags::None;
-    reliableUdp.Send(sessionId, data, flags);
-
-    std::lock_guard lock(sessionsMutex);
-    auto it = clientSessions.find(sessionId);
-    if (it != clientSessions.end()) {
-        it->second.bytesSent += data.size();
+    std::lock_guard lock(clientsMutex);
+    for (auto& [id, client] : clients) {
+        if (client.channel) {
+            PacketHeader disconnectHeader;
+            disconnectHeader.flags = PacketHeader::FLAG_DISCONNECT;
+            client.channel->SendPacket(disconnectHeader, {});
+        }
     }
+    clients.clear();
+    endpointToClientId.clear();
+
+    socket.Close();
+    AddLog("[NetworkServer] Shutdown complete");
 }
 
-void NetworkServer::Broadcast(std::span<const uint8_t> data, bool reliable, uint32_t exceptSessionId) {
-    if (!isRunning) return;
+void NetworkServer::Poll() {
+    if (!running) return;
 
-    std::lock_guard lock(sessionsMutex);
-    for (auto& [id, session] : clientSessions) {
-        if (id == exceptSessionId) continue;
+    static thread_local std::vector<uint8_t> recvBuffer(65536);
 
-        auto flags = reliable ? PacketFlags::Reliable : PacketFlags::None;
-        reliableUdp.Send(id, data, flags);
-        session.bytesSent += data.size();
-    }
-}
+    // Process up to 1000 packets per tick to prevent starvation
+    for (int i = 0; i < 1000; ++i) {
+        Endpoint sender;
+        auto recvd = socket.RecvFrom(recvBuffer, sender);
 
-void NetworkServer::BroadcastToArea(float centerX, float centerZ, float radius,
-                                    std::span<const uint8_t> data, bool reliable) {
-    if (!isRunning) return;
+        if (!recvd) {
+            // Socket error
+            break;
+        }
+        if (*recvd == 0) {
+            // No more data
+            break;
+        }
+        if (*recvd < 0) {
+            break;
+        }
 
-    // TODO: Integrate with spatial hash (AP-40)
-    // For now, broadcast to all (fallback)
-    Broadcast(data, reliable);
-}
+        auto packetData = std::span(recvBuffer.data(), *recvd);
 
-// =============================================================================
-// Session Management
-// =============================================================================
+        // Check for connection request (new client)
+        if (packetData.size() >= sizeof(PacketHeader)) {
+            PacketHeader header;
+            std::memcpy(&header, packetData.data(), sizeof(PacketHeader));
 
-bool NetworkServer::HasSession(uint32_t sessionId) const {
-    std::lock_guard lock(sessionsMutex);
-    return clientSessions.contains(sessionId);
-}
+            if (header.flags & PacketHeader::FLAG_CONNECT) {
+                uint32_t clientId = GetOrCreateClientId(sender);
+                AddLog("[NetworkServer] New client connected: {} from {}", clientId, sender.ToString());
 
-size_t NetworkServer::GetSessionCount() const {
-    std::lock_guard lock(sessionsMutex);
-    return clientSessions.size();
-}
+                if (connectHandler) {
+                    connectHandler(clientId);
+                }
+                continue;
+            }
+        }
 
-UdpClientSession* NetworkServer::GetSession(uint32_t sessionId) {
-    std::lock_guard lock(sessionsMutex);
-    auto it = clientSessions.find(sessionId);
-    return it != clientSessions.end() ? &it->second : nullptr;
-}
+        // Route to existing client
+        std::string epKey = sender.ToString();
+        uint32_t clientId = 0;
+        {
+            std::lock_guard lock(clientsMutex);
+            auto it = endpointToClientId.find(epKey);
+            if (it != endpointToClientId.end()) {
+                clientId = it->second;
+            }
+        }
 
-void NetworkServer::DisconnectSession(uint32_t sessionId) {
-    reliableUdp.DestroySession(sessionId);
+        if (clientId == 0) {
+            // Unknown endpoint, might be a new client trying to connect without FLAG_CONNECT
+            clientId = GetOrCreateClientId(sender);
+            AddLog("[NetworkServer] Auto-registered client: {} from {}", clientId, sender.ToString());
+            if (connectHandler) {
+                connectHandler(clientId);
+            }
+        }
 
-    std::lock_guard lock(sessionsMutex);
-    clientSessions.erase(sessionId);
-}
+        // Process through reliable channel
+        ClientConnection* client = nullptr;
+        {
+            std::lock_guard lock(clientsMutex);
+            auto it = clients.find(clientId);
+            if (it != clients.end()) {
+                client = &it->second;
+            }
+        }
 
-// =============================================================================
-// Loops
-// =============================================================================
+        if (client && client->channel) {
+            client->lastRecvTime = std::chrono::steady_clock::now();
+            client->packetsRecv++;
+            client->bytesRecv += *recvd;
 
-void NetworkServer::ReceiveLoop() {
-    AddLog("[Net] Receive thread started");
-
-    while (isRunning) {
-        size_t processed = reliableUdp.Receive();
-
-        if (processed == 0) {
-            // No data, yield to prevent busy-waiting
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            if (client->channel->ProcessIncoming(packetData, sender)) {
+                // Check for complete messages
+                while (auto msg = client->channel->PopMessage()) {
+                    if (packetHandler) {
+                        packetHandler(clientId, std::span(msg->data(), msg->size()));
+                    }
+                }
+            }
         }
     }
 
-    AddLog("[Net] Receive thread stopped");
-}
-
-void NetworkServer::UpdateLoop() {
-    AddLog("[Net] Update thread started");
-
-    auto lastTime = std::chrono::steady_clock::now();
-
-    while (isRunning) {
-        auto now = std::chrono::steady_clock::now();
-        float deltaTime = std::chrono::duration<float>(now - lastTime).count();
-        lastTime = now;
-
-        reliableUdp.Update(deltaTime);
-
-        // Target tick rate
-        float targetFrameTime = 1.0f / tickRate;
-        if (deltaTime < targetFrameTime) {
-            std::this_thread::sleep_for(
-                std::chrono::duration<float>(targetFrameTime - deltaTime));
+    // Update all channels (retransmissions, etc.)
+    {
+        std::lock_guard lock(clientsMutex);
+        for (auto& [id, client] : clients) {
+            if (client.channel) {
+                client.channel->Update(0.016f); // Assume 60Hz tick
+            }
         }
     }
 
-    AddLog("[Net] Update thread stopped");
+    // Cleanup timed out clients
+    CleanupTimedOutClients();
 }
 
-// =============================================================================
-// Event Handlers
-// =============================================================================
-
-void NetworkServer::HandlePacket(uint32_t sessionId, std::span<const uint8_t> data) {
-    std::lock_guard lock(sessionsMutex);
-    auto it = clientSessions.find(sessionId);
-    if (it != clientSessions.end()) {
-        it->second.bytesRecv += data.size();
+bool NetworkServer::SendToClient(uint32_t clientId, std::span<const uint8_t> payload, bool reliable) {
+    std::lock_guard lock(clientsMutex);
+    auto it = clients.find(clientId);
+    if (it == clients.end() || !it->second.channel) {
+        return false;
     }
 
-    if (onPacketReceived) {
-        onPacketReceived(sessionId, data);
+    bool sent = reliable 
+        ? it->second.channel->SendReliable(payload)
+        : it->second.channel->SendUnreliable(payload);
+
+    if (sent) {
+        it->second.packetsSent++;
+        it->second.bytesSent += payload.size();
     }
+
+    return sent;
 }
 
-void NetworkServer::HandleConnect(uint32_t sessionId) {
-    std::lock_guard lock(sessionsMutex);
-
-    UdpClientSession session;
-    session.sessionId = sessionId;
-    session.entityId = 0; // Will be assigned by game logic
-
-    clientSessions[sessionId] = session;
-
-    AddLog("[Net] Client connected: session {}", sessionId);
-
-    if (onClientConnected) {
-        onClientConnected(sessionId);
-    }
-}
-
-void NetworkServer::HandleDisconnect(uint32_t sessionId) {
-    std::lock_guard lock(sessionsMutex);
-    clientSessions.erase(sessionId);
-
-    AddLog("[Net] Client disconnected: session {}", sessionId);
-
-    if (onClientDisconnected) {
-        onClientDisconnected(sessionId);
+void NetworkServer::Broadcast(std::span<const uint8_t> payload, bool reliable) {
+    std::lock_guard lock(clientsMutex);
+    for (auto& [id, client] : clients) {
+        if (client.channel) {
+            bool sent = reliable 
+                ? client.channel->SendReliable(payload)
+                : client.channel->SendUnreliable(payload);
+            if (sent) {
+                client.packetsSent++;
+                client.bytesSent += payload.size();
+            }
+        }
     }
 }
 
-// =============================================================================
-// Statistics
-// =============================================================================
-
-float NetworkServer::GetAveragePing() const {
-    std::lock_guard lock(sessionsMutex);
-    if (clientSessions.empty()) return 0.0f;
-
-    float total = 0.0f;
-    for (const auto& [id, session] : clientSessions) {
-        total += session.pingMs;
+void NetworkServer::BroadcastExcept(uint32_t excludeClientId, std::span<const uint8_t> payload, bool reliable) {
+    std::lock_guard lock(clientsMutex);
+    for (auto& [id, client] : clients) {
+        if (id == excludeClientId) continue;
+        if (client.channel) {
+            bool sent = reliable 
+                ? client.channel->SendReliable(payload)
+                : client.channel->SendUnreliable(payload);
+            if (sent) {
+                client.packetsSent++;
+                client.bytesSent += payload.size();
+            }
+        }
     }
-    return total / static_cast<float>(clientSessions.size());
 }
 
-void NetworkServer::PrintStatistics() const {
-    std::lock_guard lock(sessionsMutex);
+void NetworkServer::DisconnectClient(uint32_t clientId) {
+    {
+        std::lock_guard lock(clientsMutex);
+        auto it = clients.find(clientId);
+        if (it != clients.end()) {
+            // Send disconnect packet
+            if (it->second.channel) {
+                PacketHeader header;
+                header.flags = PacketHeader::FLAG_DISCONNECT;
+                it->second.channel->SendPacket(header, {});
+            }
 
-    uint64_t totalSent = 0, totalRecv = 0;
-    for (const auto& [id, session] : clientSessions) {
-        totalSent += session.bytesSent;
-        totalRecv += session.bytesRecv;
+            endpointToClientId.erase(it->second.endpoint.ToString());
+            clients.erase(it);
+        }
     }
 
-    uint64_t udpSent = 0, udpRecv = 0, udpLost = 0;
-    reliableUdp.GetStatistics(udpSent, udpRecv, udpLost);
+    if (disconnectHandler) {
+        disconnectHandler(clientId);
+    }
 
-    AddLog("[Net] === Server Statistics ===");
-    AddLog("[Net] Sessions: {}", clientSessions.size());
-    AddLog("[Net] Avg Ping: {:.1f}ms", GetAveragePing());
-    AddLog("[Net] App Bytes Sent: {}, Recv: {}", totalSent, totalRecv);
-    AddLog("[Net] UDP Packets Sent: {}, Recv: {}, Lost: {}", udpSent, udpRecv, udpLost);
+    AddLog("[NetworkServer] Client {} disconnected", clientId);
+}
+
+bool NetworkServer::IsClientConnected(uint32_t clientId) const {
+    std::lock_guard lock(clientsMutex);
+    return clients.contains(clientId);
+}
+
+size_t NetworkServer::GetClientCount() const {
+    std::lock_guard lock(clientsMutex);
+    return clients.size();
+}
+
+NetworkServer::ServerStats NetworkServer::GetStats() const {
+    std::lock_guard lock(clientsMutex);
+    ServerStats stats{};
+    float totalRtt = 0.0f;
+    size_t rttCount = 0;
+
+    for (const auto& [id, client] : clients) {
+        stats.totalBytesSent += client.bytesSent;
+        stats.totalBytesRecv += client.bytesRecv;
+        stats.totalPacketsSent += client.packetsSent;
+        stats.totalPacketsRecv += client.packetsRecv;
+
+        if (client.channel) {
+            totalRtt += client.channel->GetRtt();
+            rttCount++;
+        }
+    }
+
+    if (rttCount > 0) {
+        stats.averageRtt = totalRtt / static_cast<float>(rttCount);
+    }
+
+    return stats;
+}
+
+uint32_t NetworkServer::GetOrCreateClientId(const Endpoint& endpoint) {
+    std::lock_guard lock(clientsMutex);
+
+    std::string epKey = endpoint.ToString();
+    auto it = endpointToClientId.find(epKey);
+    if (it != endpointToClientId.end()) {
+        return it->second;
+    }
+
+    if (clients.size() >= maxClients) {
+        AddLog("[NetworkServer] Max clients reached ({})");
+        return 0;
+    }
+
+    uint32_t clientId = nextClientId++;
+
+    ClientConnection conn;
+    conn.clientId = clientId;
+    conn.endpoint = endpoint;
+    conn.channel = std::make_unique<ReliableChannel>(&socket, endpoint);
+    conn.lastRecvTime = std::chrono::steady_clock::now();
+
+    clients[clientId] = std::move(conn);
+    endpointToClientId[epKey] = clientId;
+
+    return clientId;
+}
+
+void NetworkServer::RemoveClient(uint32_t clientId) {
+    std::lock_guard lock(clientsMutex);
+    auto it = clients.find(clientId);
+    if (it != clients.end()) {
+        endpointToClientId.erase(it->second.endpoint.ToString());
+        clients.erase(it);
+    }
+}
+
+void NetworkServer::CleanupTimedOutClients() {
+    auto now = std::chrono::steady_clock::now();
+    std::vector<uint32_t> toRemove;
+
+    {
+        std::lock_guard lock(clientsMutex);
+        for (const auto& [id, client] : clients) {
+            float elapsed = std::chrono::duration<float>(now - client.lastRecvTime).count();
+            if (elapsed > clientTimeout) {
+                toRemove.push_back(id);
+            }
+        }
+    }
+
+    for (uint32_t id : toRemove) {
+        AddLog("[NetworkServer] Client {} timed out", id);
+        DisconnectClient(id);
+    }
 }
 
 } // namespace net
