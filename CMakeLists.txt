@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(TheSeed VERSION 13.1 LANGUAGES CXX)
+project(TheSeed VERSION 13.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,11 +40,6 @@ set(CORE_SOURCES
 )
 
 # =============================================================================
-# SOURCE FILES — MATH (AP-13)
-# =============================================================================
-# Header-only: Keine .cpp nötig. PCH optimiert Kompilierung.
-
-# =============================================================================
 # SOURCE FILES — MEMORY (AP-14)
 # =============================================================================
 set(MEMORY_SOURCES
@@ -55,31 +50,49 @@ set(MEMORY_SOURCES
 )
 
 # =============================================================================
-# SOURCE FILES — NETWORK (AP-32–AP-36: UDP + Reliability)
+# SOURCE FILES — ECS (AP-20–AP-23) — Header-only, keine .cpp nötig
+# =============================================================================
+set(ECS_HEADERS
+    ecs/Components.h
+    ecs/ecs_Archetype.h
+    ecs/ecs_Chunk.h
+    ecs/ecs_ComponentTraits.h
+    ecs/ecs_ECS.h
+    ecs/ecs_EcsWorld.h
+    ecs/ecs_EntityManager.h
+    ecs/ecs_Query.h
+    ecs/ecs_Types.h
+)
+
+# =============================================================================
+# SOURCE FILES — NETWORK (AP-32–AP-36)
 # =============================================================================
 set(NETWORK_SOURCES
-    network/UdpSocket.cpp
-    network/ReliableUdp.cpp
-    network/NetworkServer.cpp
+    network/network_UdpSocket.cpp
+    network/network_ReliableUdp.cpp
+    network/network_NetworkServer.cpp
 )
 
 # =============================================================================
-# SOURCE FILES — CLIENT
-# =============================================================================
-set(CLIENT_SOURCES
-    client/Connection.cpp
-    client/ClientTick.cpp
-    client/Renderer.cpp
-)
-
-# =============================================================================
-# SOURCE FILES — SERVER
+# SOURCE FILES — SERVER (AP-32, AP-37, AP-42, AP-45)
 # =============================================================================
 set(SERVER_SOURCES
     server/Network.cpp
     server/Validation.cpp
     server/PacketHandler.cpp
     server/Server.cpp
+    server/auth/AuthService.cpp
+    server/network/Snapshot.cpp
+)
+
+# =============================================================================
+# SOURCE FILES — CLIENT (AP-38)
+# =============================================================================
+set(CLIENT_SOURCES
+    client/Connection.cpp
+    client/ClientTick.cpp
+    client/Renderer.cpp
+    client/Interpolation.cpp
 )
 
 # =============================================================================
@@ -107,12 +120,6 @@ set(RENDERER_VULKAN_SOURCES
 )
 
 # =============================================================================
-# SOURCE FILES — ECS (AP-20: Archetype Storage — HEADER-ONLY)
-# =============================================================================
-# ECS is header-only in V13.1. Implementation in headers for inlining.
-# No .cpp files needed for core ECS.
-
-# =============================================================================
 # MAIN
 # =============================================================================
 set(MAIN_SOURCE main.cpp)
@@ -124,13 +131,12 @@ set(ALL_SOURCES
     ${CORE_SOURCES}
     ${MEMORY_SOURCES}
     ${NETWORK_SOURCES}
-    ${CLIENT_SOURCES}
     ${SERVER_SOURCES}
+    ${CLIENT_SOURCES}
     ${EDITOR_SOURCES}
     ${MAIN_SOURCE}
 )
 
-# Vulkan-Renderer nur bei aktiviertem Flag
 if(ENGINE_ENABLE_VULKAN)
     list(APPEND ALL_SOURCES ${RENDERER_VULKAN_SOURCES})
     message(STATUS "[CMake] Vulkan renderer enabled")
@@ -138,14 +144,6 @@ else()
     message(STATUS "[CMake] Using OpenGL legacy renderer")
 endif()
 
-# ECS nur bei aktiviertem Flag (nach AP-23)
-# if(ENGINE_ENABLE_ECS)
-#     list(APPEND ALL_SOURCES ${ECS_SOURCES})
-# endif()
-
-# =============================================================================
-# EXECUTABLE
-# =============================================================================
 add_executable(TheSeed ${ALL_SOURCES})
 
 # =============================================================================
@@ -155,6 +153,7 @@ find_package(OpenGL REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(SQLite3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
+find_package(glad CONFIG REQUIRED)
 
 find_path(IMGUI_INCLUDE_DIR imgui.h PATH_SUFFIXES imgui)
 find_library(IMGUI_LIBRARY imgui)
@@ -163,10 +162,9 @@ if(NOT IMGUI_INCLUDE_DIR OR NOT IMGUI_LIBRARY)
     message(FATAL_ERROR "ImGui not found. Install via vcpkg: imgui[glfw-binding,opengl3-binding]")
 endif()
 
-find_package(glad CONFIG REQUIRED)
-
 if(ENGINE_ENABLE_VULKAN)
     find_package(Vulkan REQUIRED)
+    find_package(vk-bootstrap CONFIG REQUIRED)
 endif()
 
 # =============================================================================
@@ -181,6 +179,8 @@ target_include_directories(TheSeed PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/memory
     ${CMAKE_CURRENT_SOURCE_DIR}/client
     ${CMAKE_CURRENT_SOURCE_DIR}/server
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/auth
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/network
     ${CMAKE_CURRENT_SOURCE_DIR}/editor
     ${CMAKE_CURRENT_SOURCE_DIR}/renderer_vulkan
     ${IMGUI_INCLUDE_DIR}
@@ -229,7 +229,7 @@ else()
         -Wshadow
         -Wnon-virtual-dtor
         $<$<CONFIG:Release>:-O3 -march=native>
-        $<$<CONFIG:RelWithDebInfo>:-O2 -g>
+        $<$<CONFIG:Debug>:-O0 -g>
     )
 endif()
 
@@ -244,28 +244,14 @@ target_link_libraries(TheSeed PRIVATE
     glad::glad
     ${IMGUI_LIBRARY}
     $<$<BOOL:${ENGINE_ENABLE_VULKAN}>:Vulkan::Vulkan>
+    $<$<BOOL:${ENGINE_ENABLE_VULKAN}>:vk-bootstrap::vk-bootstrap>
     $<$<PLATFORM_ID:Windows>:ws2_32>
-    $<$<PLATFORM_ID:Windows>:sqlite3>
-)
-
-# =============================================================================
-# PRECOMPILED HEADER
-# =============================================================================
-target_precompile_headers(TheSeed PRIVATE
-    "<vector>"
-    "<string>"
-    "<map>"
-    "<algorithm>"
-    "<format>"
-    "<span>"
-    "<ranges>"
 )
 
 # =============================================================================
 # INSTALL
 # =============================================================================
 install(TARGETS TheSeed DESTINATION bin)
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/project/ DESTINATION share/the-seed/project OPTIONAL)
 
 # =============================================================================
 # TESTS
