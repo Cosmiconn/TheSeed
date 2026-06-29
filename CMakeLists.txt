@@ -52,17 +52,6 @@ set(MEMORY_SOURCES
 # =============================================================================
 # SOURCE FILES — ECS (AP-20–AP-23) — Header-only, keine .cpp nötig
 # =============================================================================
-set(ECS_HEADERS
-    ecs/Components.h
-    ecs/ecs_Archetype.h
-    ecs/ecs_Chunk.h
-    ecs/ecs_ComponentTraits.h
-    ecs/ecs_ECS.h
-    ecs/ecs_EcsWorld.h
-    ecs/ecs_EntityManager.h
-    ecs/ecs_Query.h
-    ecs/ecs_Types.h
-)
 
 # =============================================================================
 # SOURCE FILES — NETWORK (AP-32–AP-36)
@@ -74,15 +63,18 @@ set(NETWORK_SOURCES
 )
 
 # =============================================================================
-# SOURCE FILES — SERVER (AP-32, AP-37, AP-42, AP-45)
+# SOURCE FILES — SERVER (AP-32, AP-37, AP-42, AP-45, AP-47-49)
 # =============================================================================
 set(SERVER_SOURCES
     server/Network.cpp
     server/Validation.cpp
     server/PacketHandler.cpp
     server/Server.cpp
+    server/ThreadPool.cpp
     server/auth/AuthService.cpp
     server/network/Snapshot.cpp
+    server/ai/AIBehavior.cpp
+    server/combat/CombatSystem.cpp
 )
 
 # =============================================================================
@@ -108,7 +100,7 @@ set(EDITOR_SOURCES
 )
 
 # =============================================================================
-# SOURCE FILES — VULKAN RENDERER (AP-01, AP-02, AP-03)
+# SOURCE FILES — VULKAN RENDERER (AP-01, AP-02, AP-03, AP-04)
 # =============================================================================
 set(RENDERER_VULKAN_SOURCES
     renderer_vulkan/VulkanContext.cpp
@@ -117,6 +109,11 @@ set(RENDERER_VULKAN_SOURCES
     renderer_vulkan/VulkanDebug.cpp
     renderer_vulkan/VulkanRenderPass.cpp
     renderer_vulkan/VulkanResourceManager.cpp
+    renderer_vulkan/VulkanRenderer.cpp
+    renderer_vulkan/Mesh.cpp
+    renderer_vulkan/Texture.cpp
+    renderer_vulkan/UniformBuffer.cpp
+    renderer_vulkan/ShadowMap.cpp
 )
 
 # =============================================================================
@@ -139,7 +136,7 @@ set(ALL_SOURCES
 
 if(ENGINE_ENABLE_VULKAN)
     list(APPEND ALL_SOURCES ${RENDERER_VULKAN_SOURCES})
-    message(STATUS "[CMake] Vulkan renderer enabled")
+    message(STATUS "[CMake] Vulkan renderer enabled (AP-01–AP-04)")
 else()
     message(STATUS "[CMake] Using OpenGL legacy renderer")
 endif()
@@ -181,6 +178,8 @@ target_include_directories(TheSeed PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/server
     ${CMAKE_CURRENT_SOURCE_DIR}/server/auth
     ${CMAKE_CURRENT_SOURCE_DIR}/server/network
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/ai
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/combat
     ${CMAKE_CURRENT_SOURCE_DIR}/editor
     ${CMAKE_CURRENT_SOURCE_DIR}/renderer_vulkan
     ${IMGUI_INCLUDE_DIR}
