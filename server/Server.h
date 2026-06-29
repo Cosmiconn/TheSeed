@@ -1,35 +1,63 @@
 #pragma once
 // =============================================================================
-// server/Server.h  —  C++23 Modernized
-// Nur Deklarationen. Implementation in Server.cpp
+// server/Server.h — Updated for UDP + ECS + Multi-Threading (V13.2)
 // =============================================================================
-#include "Network.h"
-#include "PacketHandler.h"
-#include "Validation.h"
-#include "../core/GameSystems.h"
-#include "../core/Database.h"
-#include "../core/World.h"
-#include "../core/Log.h"
-#include "../core/EventSystem.h"
-#include "../core/EventTypes.h"
+#include "../network/network_NetworkServer.h"
+#include "ThreadPool.h"
+#include "../core/ByteBuffer.h"
+#include <span>
+#include <functional>
 
-#include <algorithm>
-#include <cmath>
-#include <ranges>
-#include <format>
-#include <string_view>
+// Forward declarations
+struct Entity;
 
-// =============================================================================
-// AUTOSAVE-TIMER
-// =============================================================================
-extern int dbFlushTimer;
-
-// =============================================================================
-// SPIELER-LOGOUT
-// =============================================================================
+// Legacy server init (to be replaced)
+bool ServerInit(uint16_t port);
+void ServerShutdown();
+void ProcessServerTick(std::move_only_function<void()> rebuildGPU);
 void ExecutePlayerLogout();
 
+// Legacy broadcast (to be replaced by NetworkServer::Broadcast)
+void BroadcastToAll(std::span<const uint8_t> data);
+
 // =============================================================================
-// HAUPT-SERVER-TICK
+// NEW: UDP Server Integration (AP-32/33)
 // =============================================================================
-void ProcessServerTick(std::move_only_function<void()> rebuildGPU = [](){});
+namespace net { class NetworkServer; }
+
+class GameServer {
+    std::unique_ptr<net::NetworkServer> network;
+    std::unique_ptr<server::MultiThreadedServer> threadedServer;
+    bool running = false;
+
+public:
+    GameServer() = default;
+    ~GameServer() { Shutdown(); }
+
+    [[nodiscard]] bool Startup(uint16_t port, bool multiThreaded = true);
+    void Shutdown();
+    void Tick(float deltaTime);
+
+    [[nodiscard]] bool IsRunning() const { return running; }
+    [[nodiscard]] size_t GetClientCount() const;
+
+    // Send snapshot to all clients (AP-37)
+    void BroadcastSnapshot(std::span<const uint8_t> snapshotData);
+
+    // Submit work to thread pool (AP-42)
+    template<typename F, typename... Args>
+    auto SubmitWork(F&& f, Args&&... args) {
+        if (threadedServer) {
+            return threadedServer->threadPool->Submit(std::forward<F>(f), std::forward<Args>(args)...);
+        }
+        throw std::runtime_error("Thread pool not initialized");
+    }
+
+private:
+    void OnClientConnected(uint32_t clientId);
+    void OnClientDisconnected(uint32_t clientId);
+    void OnPacketReceived(uint32_t clientId, std::span<const uint8_t> payload);
+};
+
+// Global instance (managed by main.cpp)
+extern std::unique_ptr<GameServer> gGameServer;
