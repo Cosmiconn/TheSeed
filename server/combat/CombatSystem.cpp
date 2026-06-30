@@ -1,12 +1,24 @@
 // =============================================================================
 // server/combat/CombatSystem.cpp — Combat Engine Implementation (AP-53)
 // =============================================================================
+// KORREKTUR: rand() entfernt, thread-safes std::mt19937 mit uniform_real_distribution
+// eingeführt. Jede Instanz nutzt eigenen RNG oder thread_local für deterministisches,
+// thread-safes Verhalten.
+// =============================================================================
 #include "CombatSystem.h"
 #include "../../core/Log.h"
 #include <cmath>
 #include <random>
+#include <chrono>
 
 namespace combat {
+
+// =============================================================================
+// Thread-Local RNG für deterministische, thread-safes Zufallszahlen
+// =============================================================================
+thread_local std::mt19937 gCombatRng{
+    static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count())
+};
 
 // =============================================================================
 // Damage Calculator
@@ -18,9 +30,10 @@ DamageResult DamageCalculator::Calculate(
     bool isSkill) {
 
     DamageResult result;
+    std::uniform_real_distribution<float> uniform01{0.0f, 1.0f};
 
     // Dodge check
-    float dodgeRoll = static_cast<float>(rand()) / RAND_MAX;
+    float dodgeRoll = uniform01(gCombatRng);
     if (dodgeRoll < victim.dodgeChance) {
         result.isDodged = true;
         result.finalDamage = 0;
@@ -28,29 +41,30 @@ DamageResult DamageCalculator::Calculate(
     }
 
     // Block check
-    float blockRoll = static_cast<float>(rand()) / RAND_MAX;
+    float blockRoll = uniform01(gCombatRng);
     if (blockRoll < victim.blockChance) {
         result.isBlocked = true;
         result.damageReduction = 0.5f;
     }
 
     // Critical hit check
-    float critRoll = static_cast<float>(rand()) / RAND_MAX;
+    float critRoll = uniform01(gCombatRng);
     if (critRoll < attacker.critChance) {
         result.isCritical = true;
     }
 
     // Base damage with variance (±10%)
-    float variance = 0.9f + (static_cast<float>(rand()) / RAND_MAX) * 0.2f;
-    float damage = baseDamage * variance;
+    std::uniform_real_distribution<float> varianceDist{0.9f, 1.1f};
+    float variance = varianceDist(gCombatRng);
+    float damage = static_cast<float>(baseDamage) * variance;
 
     // Apply crit multiplier
     if (result.isCritical) {
         damage *= attacker.critMultiplier;
     }
 
-    // Apply armor reduction
-    float armorReduction = victim.armor / (victim.armor + 100.0f); // Diminishing returns
+    // Apply armor reduction (diminishing returns)
+    float armorReduction = victim.armor / (victim.armor + 100.0f);
     damage *= (1.0f - armorReduction);
 
     // Apply resistance
@@ -66,13 +80,13 @@ DamageResult DamageCalculator::Calculate(
 }
 
 int DamageCalculator::ApplyCombo(int baseDamage, uint32_t comboCount) {
-    float multiplier = 1.0f + (comboCount * ComboSystem::COMBO_DAMAGE_BONUS);
-    return static_cast<int>(baseDamage * multiplier);
+    float multiplier = 1.0f + (static_cast<float>(comboCount) * ComboSystem::COMBO_DAMAGE_BONUS);
+    return static_cast<int>(static_cast<float>(baseDamage) * multiplier);
 }
 
 int DamageCalculator::ApplyStatusEffects(int damage,
-    std::span<const game::StatusEffect> attackerEffects,
-    std::span<const game::StatusEffect> victimEffects) {
+    std::span<game::StatusEffect> attackerEffects,
+    std::span<game::StatusEffect> victimEffects) {
 
     float multiplier = 1.0f;
 
@@ -104,7 +118,7 @@ int DamageCalculator::ApplyStatusEffects(int damage,
         }
     }
 
-    return static_cast<int>(damage * multiplier);
+    return static_cast<int>(static_cast<float>(damage) * multiplier);
 }
 
 // =============================================================================
@@ -143,9 +157,9 @@ bool HitboxSystem::CheckAttackArc(
     float attackerAngle = attacker.rotationY;
 
     float angleDiff = std::abs(targetAngle - attackerAngle);
-    if (angleDiff > 3.14159f) angleDiff = 2.0f * 3.14159f - angleDiff;
+    if (angleDiff > math::PI) angleDiff = 2.0f * math::PI - angleDiff;
 
-    return angleDiff <= (attackAngle * 3.14159f / 360.0f); // Half angle in radians
+    return angleDiff <= (attackAngle * math::DEG2RAD * 0.5f); // Half angle in radians
 }
 
 std::vector<uint32_t> HitboxSystem::GetEntitiesInRange(
@@ -156,7 +170,7 @@ std::vector<uint32_t> HitboxSystem::GetEntitiesInRange(
 
     std::vector<uint32_t> result;
 
-    auto query = world.Query<ecs::All<game::Transform, game::Hitbox>>();
+    auto query = world.Query<game::Transform>();
     for (auto [handle] : query) {
         uint32_t id = handle.GetIndex();
         if (id == excludeEntity) continue;
@@ -188,7 +202,7 @@ std::optional<uint32_t> HitboxSystem::Raycast(
 
     dirX /= len; dirY /= len; dirZ /= len;
 
-    auto query = world.Query<ecs::All<game::Transform, game::Hitbox>>();
+    auto query = world.Query<game::Transform, game::Hitbox>();
 
     float closestDist = maxDistance;
     uint32_t closestEntity = 0;
@@ -235,7 +249,7 @@ void ComboSystem::RegisterHit(ecs::EcsWorld& world, ecs::EntityHandle entity) {
         combo = world.GetComponent<game::ComboState>(entity);
     }
 
-    float now = static_cast<float>(std::chrono::duration<double>(
+    float now = static_cast<float>(std::chrono::duration<float>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
     if (now - combo->lastHitTime > COMBO_WINDOW) {
@@ -255,14 +269,14 @@ uint32_t ComboSystem::GetComboCount(ecs::EcsWorld& world, ecs::EntityHandle enti
 
 float ComboSystem::GetComboMultiplier(ecs::EcsWorld& world, ecs::EntityHandle entity) {
     uint32_t count = GetComboCount(world, entity);
-    return 1.0f + (count * COMBO_DAMAGE_BONUS);
+    return 1.0f + (static_cast<float>(count) * COMBO_DAMAGE_BONUS);
 }
 
 float ComboSystem::GetComboTimeRemaining(ecs::EcsWorld& world, ecs::EntityHandle entity) {
     auto* combo = world.GetComponent<game::ComboState>(entity);
     if (!combo) return 0.0f;
 
-    float now = static_cast<float>(std::chrono::duration<double>(
+    float now = static_cast<float>(std::chrono::duration<float>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
     float elapsed = now - combo->lastHitTime;
 
@@ -278,7 +292,7 @@ void ComboSystem::ResetCombo(ecs::EcsWorld& world, ecs::EntityHandle entity) {
 }
 
 void ComboSystem::Update(ecs::EcsWorld& world, float deltaTime) {
-    auto query = world.Query<ecs::All<game::ComboState>>();
+    auto query = world.Query<game::ComboState>();
 
     for (auto [handle] : query) {
         auto* combo = world.GetComponent<game::ComboState>(handle);
@@ -295,8 +309,8 @@ void ComboSystem::Update(ecs::EcsWorld& world, float deltaTime) {
 // =============================================================================
 // Combat System
 // =============================================================================
-void CombatSystem::ProcessAttack(ecs::EcsWorld& world, ecs::EntityHandle attacker, 
-                                    uint32_t skillId) {
+void CombatSystem::ProcessAttack(ecs::EcsWorld& world, ecs::EntityHandle attacker,
+    uint32_t skillId) {
     auto* attackerTransform = world.GetComponent<game::Transform>(attacker);
     auto* attackerHitbox = world.GetComponent<game::Hitbox>(attacker);
     auto* attackerStats = world.GetComponent<game::CombatStats>(attacker);
@@ -310,7 +324,7 @@ void CombatSystem::ProcessAttack(ecs::EcsWorld& world, ecs::EntityHandle attacke
 }
 
 void CombatSystem::ProcessSkill(ecs::EcsWorld& world, ecs::EntityHandle caster,
-                                 uint32_t skillId, float targetX, float targetZ) {
+    uint32_t skillId, float targetX, float targetZ) {
     // TODO: Load skill template from database
     // For now, use default AoE skill
 
@@ -321,8 +335,8 @@ void CombatSystem::ProcessSkill(ecs::EcsWorld& world, ecs::EntityHandle caster,
     float aoeRadius = 5.0f;
     int baseDamage = 30;
 
-    auto targets = HitboxSystem::GetEntitiesInRange(world, 
-        game::Transform{.x = targetX, .y = casterTransform->y, .z = targetZ}, 
+    auto targets = HitboxSystem::GetEntitiesInRange(world,
+        game::Transform{.x = targetX, .y = casterTransform->y, .z = targetZ},
         aoeRadius, caster.GetIndex());
 
     for (uint32_t targetId : targets) {
@@ -332,7 +346,7 @@ void CombatSystem::ProcessSkill(ecs::EcsWorld& world, ecs::EntityHandle caster,
 }
 
 void CombatSystem::ApplyDamage(ecs::EcsWorld& world, ecs::EntityHandle victim,
-                                int damage, uint32_t attackerId) {
+    int damage, uint32_t attackerId) {
     auto* health = world.GetComponent<game::Health>(victim);
     if (!health) return;
 
@@ -360,7 +374,7 @@ void CombatSystem::ApplyHeal(ecs::EcsWorld& world, ecs::EntityHandle target, int
 }
 
 void CombatSystem::ApplyKnockback(ecs::EcsWorld& world, ecs::EntityHandle target,
-                                     float dirX, float dirZ, float force) {
+    float dirX, float dirZ, float force) {
     auto* transform = world.GetComponent<game::Transform>(target);
     if (!transform) return;
 
@@ -380,10 +394,10 @@ void CombatSystem::Update(ecs::EcsWorld& world, float deltaTime) {
     ComboSystem::Update(world, deltaTime);
 
     // Process status effect damage over time
-    auto query = world.Query<ecs::All<game::Health, game::StatusEffectList>>();
+    auto query = world.Query<game::Health, game::StatusList>();
     for (auto [handle] : query) {
         auto* health = world.GetComponent<game::Health>(handle);
-        auto* statusList = world.GetComponent<game::StatusEffectList>(handle);
+        auto* statusList = world.GetComponent<game::StatusList>(handle);
         if (!health || !statusList) continue;
 
         for (auto& effect : statusList->effects) {
@@ -409,22 +423,22 @@ void CombatSystem::Update(ecs::EcsWorld& world, float deltaTime) {
     }
 
     // Health regeneration
-    auto regenQuery = world.Query<ecs::All<game::Health>>();
+    auto regenQuery = world.Query<game::Health>();
     for (auto [handle] : regenQuery) {
         auto* health = world.GetComponent<game::Health>(handle);
         if (!health || health->regeneration <= 0) continue;
 
         if (health->current < health->max) {
-            health->current = std::min(health->max, 
+            health->current = std::min(health->max,
                 health->current + static_cast<int>(health->regeneration * deltaTime));
         }
     }
 }
 
-void CombatSystem::HandleDeath(ecs::EcsWorld& world, ecs::EntityHandle entity, 
-                                uint32_t killerId) {
+void CombatSystem::HandleDeath(ecs::EcsWorld& world, ecs::EntityHandle entity,
+    uint32_t killerId) {
     auto* transform = world.GetComponent<game::Transform>(entity);
-    auto* monster = world.GetComponent<game::MonsterTag>(entity);
+    auto* monster = world.GetComponent<game::MonsterData>(entity);
     auto* player = world.GetComponent<game::PlayerTag>(entity);
 
     DeathEvent event;
@@ -454,7 +468,7 @@ void CombatSystem::HandleDeath(ecs::EcsWorld& world, ecs::EntityHandle entity,
 }
 
 void CombatSystem::RespawnEntity(ecs::EcsWorld& world, ecs::EntityHandle entity,
-                                    float spawnX, float spawnY, float spawnZ) {
+    float spawnX, float spawnY, float spawnZ) {
     auto* transform = world.GetComponent<game::Transform>(entity);
     auto* health = world.GetComponent<game::Health>(entity);
 
@@ -483,10 +497,10 @@ void CombatSystem::RespawnEntity(ecs::EcsWorld& world, ecs::EntityHandle entity,
 }
 
 void CombatSystem::ExecuteAttack(ecs::EcsWorld& world, ecs::EntityHandle attacker,
-                                    const game::Transform& attackerTransform,
-                                    const game::Hitbox& attackerHitbox,
-                                    const game::CombatStats& attackerStats,
-                                    uint32_t skillId) {
+    const game::Transform& attackerTransform,
+    const game::Hitbox& attackerHitbox,
+    const game::CombatStats& attackerStats,
+    uint32_t skillId) {
     (void)skillId; // Would load skill template
 
     // Default melee attack
@@ -508,8 +522,8 @@ void CombatSystem::ExecuteAttack(ecs::EcsWorld& world, ecs::EntityHandle attacke
         if (!victimTransform || !victimHitbox || !victimStats || !victimHealth) continue;
 
         // Check attack arc
-        if (!HitboxSystem::CheckAttackArc(attackerTransform, *victimTransform, 
-                                           attackAngle, attackRange)) {
+        if (!HitboxSystem::CheckAttackArc(attackerTransform, *victimTransform,
+                attackAngle, attackRange)) {
             continue;
         }
 
@@ -571,7 +585,7 @@ void CombatSystem::BroadcastCombo(const ComboEvent& event) {
 // Skill Executor
 // =============================================================================
 void SkillExecutor::StartSkill(ecs::EcsWorld& world, ecs::EntityHandle caster,
-                                uint32_t skillId, float targetX, float targetZ) {
+    uint32_t skillId, float targetX, float targetZ) {
     // Cancel existing skill
     CancelSkill(caster);
 
@@ -595,8 +609,8 @@ void SkillExecutor::Update(ecs::EcsWorld& world, CombatSystem& combat, float del
 
         if (it->remainingCastTime <= 0.0f) {
             // Skill finished casting, execute effect
-            combat.ProcessSkill(world, it->caster, it->skillId, 
-                                it->targetX, it->targetZ);
+            combat.ProcessSkill(world, it->caster, it->skillId,
+                it->targetX, it->targetZ);
             it = activeSkills.erase(it);
         } else {
             ++it;
