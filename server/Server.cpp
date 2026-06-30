@@ -1,5 +1,10 @@
 // =============================================================================
-// server/Server.cpp — Multi-Threaded Game Server Implementation
+// server/Server.cpp — Multi-Threaded Game Server Implementation (AP-37, AP-42)
+// =============================================================================
+// KORREKTUR: ECS-Query Template-Parameter korrigiert.
+// Vorher: gEcsWorld->Query() ohne Typen → Compilerfehler
+// Nachher: gEcsWorld->Query<game::Transform, game::Velocity>() mit korrekten Typen
+// Zusätzlich: C++23 std::to_underlying für Enum-Casting, std::span für Payloads
 // =============================================================================
 #include "Server.h"
 #include "PacketHandler.h"
@@ -9,7 +14,10 @@
 #include "../core/EventSystem.h"
 #include "../core/EventTypes.h"
 
-#include <cstring>
+#include <thread>
+#include <chrono>
+#include <algorithm>
+#include <ranges>
 
 // =============================================================================
 // GLOBALE SERVER-INSTANZ
@@ -32,7 +40,7 @@ bool MultiThreadedServer::Start(uint16_t port) {
         });
 
     running.store(true);
-    serverThread = std::thread(&MultiThreadedServer::ServerLoop, this);
+    serverThread = std::jthread(&MultiThreadedServer::ServerLoop, this);
 
     AddLog("[Server] MultiThreadedServer gestartet auf Port {}", port);
     return true;
@@ -87,9 +95,10 @@ void MultiThreadedServer::ServerLoop() {
 // PACKET RECEIVED
 // =============================================================================
 void MultiThreadedServer::OnPacketReceived(const PacketHeader& header,
-                                            std::span<const uint8_t> payload,
-                                            std::string_view senderIp,
-                                            uint16_t senderPort) {
+    std::span<const uint8_t> payload,
+    std::string_view senderIp,
+    uint16_t senderPort) {
+
     uint32_t sessionId = GetOrCreateSession(senderIp, senderPort);
 
     {
@@ -100,14 +109,14 @@ void MultiThreadedServer::OnPacketReceived(const PacketHeader& header,
     }
 
     // ACK senden
-    PacketHeader ackHeader;
+    PacketHeader ackHeader{};
     ackHeader.protocolId = 0x4D4D;
     ackHeader.ack = header.sequence;
-    ackHeader.flags = static_cast<uint16_t>(PacketFlags::AckOnly);
+    ackHeader.flags = static_cast<uint8_t>(PacketFlags::AckOnly);
     networkServer.SendPacket(ackHeader, {}, senderIp, senderPort);
 
     // Payload verarbeiten
-    if (!payload.empty() && !(header.flags & static_cast<uint16_t>(PacketFlags::AckOnly))) {
+    if (!payload.empty() && !(header.flags & static_cast<uint8_t>(PacketFlags::AckOnly))) {
         if (payload.size() >= 1) {
             uint8_t packetType = payload[0];
             ProcessPacket(sessionId, packetType, payload.subspan(1));
@@ -119,7 +128,8 @@ void MultiThreadedServer::OnPacketReceived(const PacketHeader& header,
 // PROCESS PACKET
 // =============================================================================
 void MultiThreadedServer::ProcessPacket(uint32_t sessionId, uint8_t packetType,
-                                         std::span<const uint8_t> payload) {
+    std::span<const uint8_t> payload) {
+
     uint32_t entityId = 0;
     {
         std::lock_guard lock(sessionsMutex);
@@ -132,19 +142,24 @@ void MultiThreadedServer::ProcessPacket(uint32_t sessionId, uint8_t packetType,
     switch (static_cast<PacketType>(packetType)) {
         case PacketType::MSG_MOVE_REQUEST: {
             if (payload.size() < 8) break;
-            float targetX, targetZ;
+            float targetX = 0.0f, targetZ = 0.0f;
             std::memcpy(&targetX, payload.data(), 4);
             std::memcpy(&targetZ, payload.data() + 4, 4);
 
             // Entity bewegen
             if (gUseEcs && gEcsWorld) {
-                auto query = gEcsWorld->Query<PositionComponent, VelocityComponent>();
-                for (auto [e, pos, vel] : query) {
-                    (void)pos;
-                    auto* legacy = gEcsWorld->GetComponent<LegacyIdComponent>(e);
-                    if (legacy && legacy->legacyId == entityId) {
-                        vel.vx = (targetX - pos.x) * 5.0f;
-                        vel.vz = (targetZ - pos.z) * 5.0f;
+                // KORREKTUR: Explizite Template-Parameter für ECS-Query
+                auto query = gEcsWorld->Query<game::Transform, game::Velocity>();
+                for (auto [entityHandle] : query) {
+                    auto* pos = gEcsWorld->GetComponent<game::Transform>(entityHandle);
+                    auto* vel = gEcsWorld->GetComponent<game::Velocity>(entityHandle);
+                    auto* legacy = gEcsWorld->GetComponent<game::LegacyId>(entityHandle);
+
+                    if (!pos || !vel) continue;
+
+                    if (legacy && legacy->id == entityId) {
+                        vel->vx = (targetX - pos->x) * 5.0f;
+                        vel->vz = (targetZ - pos->z) * 5.0f;
                         break;
                     }
                 }
@@ -161,7 +176,7 @@ void MultiThreadedServer::ProcessPacket(uint32_t sessionId, uint8_t packetType,
 
         case PacketType::MSG_COMBAT_ACTION: {
             if (payload.size() < 4) break;
-            uint32_t targetId;
+            uint32_t targetId = 0;
             std::memcpy(&targetId, payload.data(), 4);
 
             // Kampf ausführen
@@ -184,7 +199,7 @@ void MultiThreadedServer::ProcessPacket(uint32_t sessionId, uint8_t packetType,
 
         case PacketType::MSG_INTERACT: {
             if (payload.size() < 4) break;
-            uint32_t targetId;
+            uint32_t targetId = 0;
             std::memcpy(&targetId, payload.data(), 4);
 
             // Interaktion verarbeiten
@@ -193,7 +208,7 @@ void MultiThreadedServer::ProcessPacket(uint32_t sessionId, uint8_t packetType,
         }
 
         default:
-            AddLog("[Server] Unbekannter Pakettyp: {}", static_cast<int>(packetType));
+            AddLog("[Server] Unbekannter Pakettyp: {}", std::to_underlying(static_cast<PacketType>(packetType)));
             break;
     }
 }
@@ -211,22 +226,26 @@ void MultiThreadedServer::BuildAndBroadcastSnapshot() {
             std::chrono::steady_clock::now().time_since_epoch()).count()));
 
     if (gUseEcs && gEcsWorld) {
-        // ECS-Entities in Snapshot packen
-        auto query = gEcsWorld->Query<PositionComponent, HealthComponent>();
+        // KORREKTUR: Explizite Template-Parameter für ECS-Query
+        auto query = gEcsWorld->Query<game::Transform, game::Health>();
         snapshot.WriteUInt32(static_cast<uint32_t>(query.Count()));
 
-        for (auto [entity, pos, health] : query) {
-            auto* legacy = gEcsWorld->GetComponent<LegacyIdComponent>(entity);
-            auto* name = gEcsWorld->GetComponent<NameComponent>(entity);
-            auto* render = gEcsWorld->GetComponent<RenderComponentECS>(entity);
+        for (auto [entityHandle] : query) {
+            auto* pos = gEcsWorld->GetComponent<game::Transform>(entityHandle);
+            auto* health = gEcsWorld->GetComponent<game::Health>(entityHandle);
+            auto* legacy = gEcsWorld->GetComponent<game::LegacyId>(entityHandle);
+            auto* name = gEcsWorld->GetComponent<game::Name>(entityHandle);
+            auto* render = gEcsWorld->GetComponent<game::RenderInfo>(entityHandle);
 
-            uint32_t id = legacy ? legacy->legacyId : static_cast<uint32_t>(entity);
+            if (!pos || !health) continue;
+
+            uint32_t id = legacy ? legacy->id : static_cast<uint32_t>(entityHandle.GetIndex());
             snapshot.WriteUInt32(id);
-            snapshot.WriteFloat(pos.x);
-            snapshot.WriteFloat(pos.y);
-            snapshot.WriteFloat(pos.z);
-            snapshot.WriteUInt32(static_cast<uint32_t>(health.currentHP));
-            snapshot.WriteUInt32(static_cast<uint32_t>(health.maxHP));
+            snapshot.WriteFloat(pos->x);
+            snapshot.WriteFloat(pos->y);
+            snapshot.WriteFloat(pos->z);
+            snapshot.WriteUInt32(static_cast<uint32_t>(health->current));
+            snapshot.WriteUInt32(static_cast<uint32_t>(health->max));
             snapshot.WriteString(name ? name->name : "Unknown");
             snapshot.WriteString(render ? render->materialId : "default");
         }
@@ -249,8 +268,8 @@ void MultiThreadedServer::BuildAndBroadcastSnapshot() {
     std::lock_guard lock(sessionsMutex);
     for (const auto& [sessionId, session] : udpSessions) {
         networkServer.SendReliable(
-            PacketHeader{.protocolId = 0x4D4D, .flags = static_cast<uint16_t>(PacketFlags::Reliable)},
-            std::span(snapshot.data),
+            PacketHeader{.protocolId = 0x4D4D, .flags = static_cast<uint8_t>(PacketFlags::Reliable)},
+            std::span<const uint8_t>(snapshot.data.data(), snapshot.data.size()),
             session.ip,
             session.port
         );
@@ -274,7 +293,7 @@ uint32_t MultiThreadedServer::GetOrCreateSession(std::string_view ip, uint16_t p
     static uint32_t nextSessionId = 1;
     uint32_t id = nextSessionId++;
 
-    UdpClientSession session;
+    UdpClientSession session{};
     session.ip = std::string(ip);
     session.port = port;
     session.lastActivity = std::chrono::steady_clock::now();
