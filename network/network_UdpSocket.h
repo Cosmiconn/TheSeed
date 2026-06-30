@@ -1,17 +1,25 @@
 #pragma once
 // =============================================================================
-// network/UdpSocket.h — Cross-Platform UDP Socket Abstraction (AP-32)
+// network/network_UdpSocket.h — Cross-Platform UDP Socket (AP-32)
 // =============================================================================
+// KORREKTUR: Vollständige Cross-Platform-Unterstützung für Windows und Linux.
+// WSAStartup/WSACleanup korrekt gekapselt. Linux-Variante mit <sys/socket.h>.
+// =============================================================================
+
 #include <cstdint>
 #include <string>
-#include <vector>
-#include <optional>
 #include <span>
+#include <vector>
 
 #ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #pragma comment(lib, "ws2_32.lib")
+    using SocketType = SOCKET;
+    constexpr SocketType INVALID_SOCKET_VALUE = INVALID_SOCKET;
 #else
     #include <sys/socket.h>
     #include <netinet/in.h>
@@ -19,33 +27,19 @@
     #include <unistd.h>
     #include <fcntl.h>
     #include <errno.h>
-    using SOCKET = int;
-    #define INVALID_SOCKET (-1)
-    #define SOCKET_ERROR (-1)
+    using SocketType = int;
+    constexpr SocketType INVALID_SOCKET_VALUE = -1;
 #endif
 
 namespace net {
 
-struct Endpoint {
-    sockaddr_in6 addr{};
-    socklen_t addrLen = sizeof(sockaddr_in6);
-
-    [[nodiscard]] std::string ToString() const;
-    [[nodiscard]] uint16_t GetPort() const;
-    [[nodiscard]] bool IsIPv4() const;
-
-    static Endpoint FromIPv4(const std::string& ip, uint16_t port);
-    static Endpoint FromIPv6(const std::string& ip, uint16_t port);
-    static Endpoint Any(uint16_t port, bool ipv6 = true);
-};
-
+// =============================================================================
+// UDP Socket Klasse
+// =============================================================================
 class UdpSocket {
-    SOCKET fd = INVALID_SOCKET;
-    bool nonBlocking = false;
-
 public:
-    UdpSocket() = default;
-    ~UdpSocket() { Close(); }
+    UdpSocket();
+    ~UdpSocket();
 
     UdpSocket(const UdpSocket&) = delete;
     UdpSocket& operator=(const UdpSocket&) = delete;
@@ -56,29 +50,37 @@ public:
     // ===================================================================
     // Lifecycle
     // ===================================================================
-    [[nodiscard]] bool Create(bool ipv6 = true);
+    [[nodiscard]] bool Create(uint16_t port);
     void Close();
-    [[nodiscard]] bool IsValid() const { return fd != INVALID_SOCKET; }
-
-    // ===================================================================
-    // Configuration
-    // ===================================================================
-    [[nodiscard]] bool SetNonBlocking(bool enable);
-    [[nodiscard]] bool SetReuseAddr(bool enable);
-    [[nodiscard]] bool SetRecvBufferSize(int size);
-    [[nodiscard]] bool SetSendBufferSize(int size);
-    [[nodiscard]] bool Bind(const Endpoint& endpoint);
+    [[nodiscard]] bool IsValid() const { return socketHandle != INVALID_SOCKET_VALUE; }
 
     // ===================================================================
     // I/O
     // ===================================================================
-    [[nodiscard]] std::optional<int> SendTo(std::span<const uint8_t> data, const Endpoint& dest);
-    [[nodiscard]] std::optional<int> RecvFrom(std::span<uint8_t> buffer, Endpoint& outSender);
+    // Empfängt Daten. Gibt Anzahl empfangener Bytes zurück (0 = nichts, -1 = Fehler)
+    int ReceiveFrom(std::vector<uint8_t>& buffer, std::string& senderIp, uint16_t& senderPort);
 
-    // Non-blocking peek: returns 0 if no data, >0 if data available
-    [[nodiscard]] int Peek() const;
+    // Sendet Daten an Ziel
+    [[nodiscard]] bool SendTo(std::span<const uint8_t> data, std::string_view ip, uint16_t port);
 
-    [[nodiscard]] SOCKET NativeHandle() const { return fd; }
+    // Setzt Socket auf non-blocking
+    [[nodiscard]] bool SetNonBlocking();
+
+    // ===================================================================
+    // Getters
+    // ===================================================================
+    [[nodiscard]] uint16_t GetBoundPort() const { return boundPort; }
+
+private:
+    SocketType socketHandle = INVALID_SOCKET_VALUE;
+    uint16_t boundPort = 0;
+    bool isNonBlocking = false;
+
+    #ifdef _WIN32
+    static int wsaInitCount;
+    static bool InitializeWinsock();
+    static void CleanupWinsock();
+    #endif
 };
 
 } // namespace net

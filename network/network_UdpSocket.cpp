@@ -1,190 +1,221 @@
 // =============================================================================
-// network/UdpSocket.cpp — Cross-Platform UDP Implementation (AP-32)
+// network/network_UdpSocket.cpp — Cross-Platform UDP Implementation (AP-32)
 // =============================================================================
 #include "network_UdpSocket.h"
 #include "../core/Log.h"
+
 #include <cstring>
 
 namespace net {
 
-// =============================================================================
-// Endpoint Helpers
-// =============================================================================
-std::string Endpoint::ToString() const {
-    char buf[INET6_ADDRSTRLEN];
-    if (IsIPv4()) {
-        auto* sin = reinterpret_cast<const sockaddr_in*>(&addr);
-        inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
-        return std::format("{}:{}", buf, ntohs(sin->sin_port));
-    } else {
-        inet_ntop(AF_INET6, &addr.sin6_addr, buf, sizeof(buf));
-        return std::format("[{}]:{}", buf, ntohs(addr.sin6_port));
+#ifdef _WIN32
+int UdpSocket::wsaInitCount = 0;
+
+bool UdpSocket::InitializeWinsock() {
+    if (wsaInitCount == 0) {
+        WSADATA wsaData;
+        int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+        if (result != 0) {
+            AddLog("[Net] WSAStartup fehlgeschlagen: {}", result);
+            return false;
+        }
+        AddLog("[Net] Winsock initialisiert");
+    }
+    wsaInitCount++;
+    return true;
+}
+
+void UdpSocket::CleanupWinsock() {
+    wsaInitCount--;
+    if (wsaInitCount <= 0) {
+        WSACleanup();
+        wsaInitCount = 0;
+        AddLog("[Net] Winsock bereinigt");
     }
 }
-
-uint16_t Endpoint::GetPort() const {
-    if (IsIPv4()) {
-        return ntohs(reinterpret_cast<const sockaddr_in*>(&addr)->sin_port);
-    }
-    return ntohs(addr.sin6_port);
-}
-
-bool Endpoint::IsIPv4() const {
-    return addr.sin6_family == AF_INET;
-}
-
-Endpoint Endpoint::FromIPv4(const std::string& ip, uint16_t port) {
-    Endpoint ep;
-    auto* sin = reinterpret_cast<sockaddr_in*>(&ep.addr);
-    sin->sin_family = AF_INET;
-    sin->sin_port = htons(port);
-    inet_pton(AF_INET, ip.c_str(), &sin->sin_addr);
-    ep.addrLen = sizeof(sockaddr_in);
-    return ep;
-}
-
-Endpoint Endpoint::FromIPv6(const std::string& ip, uint16_t port) {
-    Endpoint ep;
-    ep.addr.sin6_family = AF_INET6;
-    ep.addr.sin6_port = htons(port);
-    inet_pton(AF_INET6, ip.c_str(), &ep.addr.sin6_addr);
-    ep.addrLen = sizeof(sockaddr_in6);
-    return ep;
-}
-
-Endpoint Endpoint::Any(uint16_t port, bool ipv6) {
-    if (ipv6) {
-        Endpoint ep;
-        ep.addr.sin6_family = AF_INET6;
-        ep.addr.sin6_port = htons(port);
-        ep.addr.sin6_addr = in6addr_any;
-        ep.addrLen = sizeof(sockaddr_in6);
-        return ep;
-    }
-    return FromIPv4("0.0.0.0", port);
-}
+#endif
 
 // =============================================================================
-// UdpSocket
+// Konstruktor / Destruktor
 // =============================================================================
-UdpSocket::UdpSocket(UdpSocket&& other) noexcept : fd(other.fd), nonBlocking(other.nonBlocking) {
-    other.fd = INVALID_SOCKET;
+UdpSocket::UdpSocket() {
+    #ifdef _WIN32
+    InitializeWinsock();
+    #endif
+}
+
+UdpSocket::~UdpSocket() {
+    Close();
+    #ifdef _WIN32
+    CleanupWinsock();
+    #endif
+}
+
+UdpSocket::UdpSocket(UdpSocket&& other) noexcept
+    : socketHandle(other.socketHandle)
+    , boundPort(other.boundPort)
+    , isNonBlocking(other.isNonBlocking) {
+    other.socketHandle = INVALID_SOCKET_VALUE;
+    other.boundPort = 0;
+    #ifdef _WIN32
+    wsaInitCount++; // Übernehme Referenz
+    #endif
 }
 
 UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
     if (this != &other) {
         Close();
-        fd = other.fd;
-        nonBlocking = other.nonBlocking;
-        other.fd = INVALID_SOCKET;
+        socketHandle = other.socketHandle;
+        boundPort = other.boundPort;
+        isNonBlocking = other.isNonBlocking;
+        other.socketHandle = INVALID_SOCKET_VALUE;
+        other.boundPort = 0;
+        #ifdef _WIN32
+        wsaInitCount++;
+        #endif
     }
     return *this;
 }
 
-bool UdpSocket::Create(bool ipv6) {
-    Close();
-    fd = socket(ipv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd == INVALID_SOCKET) {
-        AddLog("[UdpSocket] socket() failed: {}", WSAGetLastError());
+// =============================================================================
+// Create
+// =============================================================================
+bool UdpSocket::Create(uint16_t port) {
+    socketHandle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socketHandle == INVALID_SOCKET_VALUE) {
+        AddLog("[Net] socket() fehlgeschlagen");
         return false;
     }
 
-    // Dual-stack: IPv6 socket can also accept IPv4 (if supported)
-    if (ipv6) {
-        int no = 0;
-        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&no, sizeof(no));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(socketHandle, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        AddLog("[Net] bind() fehlgeschlagen auf Port {}", port);
+        Close();
+        return false;
     }
 
+    boundPort = port;
+    AddLog("[Net] UDP Socket gebunden auf Port {}", port);
     return true;
 }
 
+// =============================================================================
+// Close
+// =============================================================================
 void UdpSocket::Close() {
-    if (fd != INVALID_SOCKET) {
-#ifdef _WIN32
-        closesocket(fd);
-#else
-        close(fd);
-#endif
-        fd = INVALID_SOCKET;
+    if (socketHandle != INVALID_SOCKET_VALUE) {
+        #ifdef _WIN32
+        closesocket(socketHandle);
+        #else
+        close(socketHandle);
+        #endif
+        socketHandle = INVALID_SOCKET_VALUE;
+        boundPort = 0;
     }
 }
 
-bool UdpSocket::SetNonBlocking(bool enable) {
-    nonBlocking = enable;
-#ifdef _WIN32
-    u_long mode = enable ? 1 : 0;
-    return ioctlsocket(fd, FIONBIO, &mode) == 0;
-#else
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) return false;
-    flags = enable ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
-    return fcntl(fd, F_SETFL, flags) != -1;
-#endif
-}
+// =============================================================================
+// ReceiveFrom
+// =============================================================================
+int UdpSocket::ReceiveFrom(std::vector<uint8_t>& buffer, std::string& senderIp, uint16_t& senderPort) {
+    if (!IsValid()) return -1;
 
-bool UdpSocket::SetReuseAddr(bool enable) {
-    int val = enable ? 1 : 0;
-    return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&val, sizeof(val)) == 0;
-}
+    sockaddr_in senderAddr{};
+    #ifdef _WIN32
+    int addrLen = sizeof(senderAddr);
+    #else
+    socklen_t addrLen = sizeof(senderAddr);
+    #endif
 
-bool UdpSocket::SetRecvBufferSize(int size) {
-    return setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char*)&size, sizeof(size)) == 0;
-}
+    int received = recvfrom(socketHandle,
+                            reinterpret_cast<char*>(buffer.data()),
+                            static_cast<int>(buffer.size()),
+                            0,
+                            reinterpret_cast<sockaddr*>(&senderAddr),
+                            &addrLen);
 
-bool UdpSocket::SetSendBufferSize(int size) {
-    return setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char*)&size, sizeof(size)) == 0;
-}
-
-bool UdpSocket::Bind(const Endpoint& endpoint) {
-    const sockaddr* sa = reinterpret_cast<const sockaddr*>(&endpoint.addr);
-    return bind(fd, sa, endpoint.addrLen) == 0;
-}
-
-std::optional<int> UdpSocket::SendTo(std::span<const uint8_t> data, const Endpoint& dest) {
-    int sent = sendto(fd, reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()), 
-                      0, reinterpret_cast<const sockaddr*>(&dest.addr), dest.addrLen);
-    if (sent == SOCKET_ERROR) {
-#ifdef _WIN32
+    if (received > 0) {
+        char ipStr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &senderAddr.sin_addr, ipStr, INET_ADDRSTRLEN);
+        senderIp = ipStr;
+        senderPort = ntohs(senderAddr.sin_port);
+    } else if (received < 0) {
+        #ifdef _WIN32
         int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return 0;
-#else
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
-#endif
-        return std::nullopt;
+        if (err != WSAEWOULDBLOCK) {
+            AddLog("[Net] recvfrom() Fehler: {}", err);
+        }
+        #else
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            AddLog("[Net] recvfrom() Fehler: {}", errno);
+        }
+        #endif
     }
-    return sent;
+
+    return received;
 }
 
-std::optional<int> UdpSocket::RecvFrom(std::span<uint8_t> buffer, Endpoint& outSender) {
-    outSender.addrLen = sizeof(outSender.addr);
-    int recvd = recvfrom(fd, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()),
-                         0, reinterpret_cast<sockaddr*>(&outSender.addr), &outSender.addrLen);
-    if (recvd == SOCKET_ERROR) {
-#ifdef _WIN32
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return 0;
-#else
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
-#endif
-        return std::nullopt;
+// =============================================================================
+// SendTo
+// =============================================================================
+bool UdpSocket::SendTo(std::span<const uint8_t> data, std::string_view ip, uint16_t port) {
+    if (!IsValid()) return false;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.data(), &addr.sin_addr);
+
+    int sent = sendto(socketHandle,
+                      reinterpret_cast<const char*>(data.data()),
+                      static_cast<int>(data.size()),
+                      0,
+                      reinterpret_cast<sockaddr*>(&addr),
+                      sizeof(addr));
+
+    if (sent < 0) {
+        #ifdef _WIN32
+        AddLog("[Net] sendto() Fehler: {}", WSAGetLastError());
+        #else
+        AddLog("[Net] sendto() Fehler: {}", errno);
+        #endif
+        return false;
     }
-    return recvd;
+
+    return static_cast<size_t>(sent) == data.size();
 }
 
-int UdpSocket::Peek() const {
-    char buf[1];
-    sockaddr_storage from{};
-    socklen_t fromLen = sizeof(from);
-    int recvd = recvfrom(fd, buf, 1, MSG_PEEK, reinterpret_cast<sockaddr*>(&from), &fromLen);
-    if (recvd == SOCKET_ERROR) {
-#ifdef _WIN32
-        int err = WSAGetLastError();
-        return (err == WSAEWOULDBLOCK) ? 0 : -1;
-#else
-        return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
-#endif
+// =============================================================================
+// SetNonBlocking
+// =============================================================================
+bool UdpSocket::SetNonBlocking() {
+    if (!IsValid()) return false;
+
+    #ifdef _WIN32
+    u_long mode = 1;
+    if (ioctlsocket(socketHandle, FIONBIO, &mode) != 0) {
+        AddLog("[Net] ioctlsocket(FIONBIO) fehlgeschlagen");
+        return false;
     }
-    return recvd;
+    #else
+    int flags = fcntl(socketHandle, F_GETFL, 0);
+    if (flags < 0) {
+        AddLog("[Net] fcntl(F_GETFL) fehlgeschlagen");
+        return false;
+    }
+    if (fcntl(socketHandle, F_SETFL, flags | O_NONBLOCK) < 0) {
+        AddLog("[Net] fcntl(F_SETFL) fehlgeschlagen");
+        return false;
+    }
+    #endif
+
+    isNonBlocking = true;
+    AddLog("[Net] Socket auf non-blocking gesetzt");
+    return true;
 }
 
 } // namespace net

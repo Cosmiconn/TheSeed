@@ -1,118 +1,128 @@
 #pragma once
 // =============================================================================
-// network/NetworkServer.h — High-Level Network Server (AP-32 + AP-33)
-// Replaces server/Network.cpp TCP blocking with UDP + reliability
+// network/network_NetworkServer.h — High-Level Network Server (P4)
+// =============================================================================
+// KORREKTUR P4: Vollstaendige Deklaration. Packet-Callback. Session-Management.
 // =============================================================================
 #include "network_UdpSocket.h"
 #include "network_ReliableUdp.h"
+#include "../core/Types.h"
+
 #include <cstdint>
-#include <string>
 #include <vector>
-#include <unordered_map>
-#include <memory>
-#include <mutex>
 #include <span>
+#include <memory>
+#include <unordered_map>
+#include <mutex>
+#include <chrono>
+#include <functional>
 
 namespace net {
 
-struct ClientConnection {
+// =============================================================================
+// NETZWERK-PAKET (eingehend)
+// =============================================================================
+struct NetworkPacket {
     uint32_t clientId = 0;
-    Endpoint endpoint;
-    std::unique_ptr<ReliableChannel> channel;
-    std::chrono::steady_clock::time_point lastRecvTime;
-    bool isAuthenticated = false;
-    std::string username;
-
-    // Stats
-    uint64_t bytesSent = 0;
-    uint64_t bytesRecv = 0;
-    uint32_t packetsSent = 0;
-    uint32_t packetsRecv = 0;
+    std::vector<uint8_t> data;
+    std::chrono::steady_clock::time_point receiveTime;
 };
 
+// =============================================================================
+// PENDING PACKET (fuer Retransmission)
+// =============================================================================
+struct PendingPacket {
+    PacketHeader header;
+    std::vector<uint8_t> payload;
+    std::string destinationIp;
+    uint16_t destinationPort = 0;
+    std::chrono::steady_clock::time_point sendTime;
+    uint32_t retryCount = 0;
+    bool acked = false;
+};
+
+// =============================================================================
+// CLIENT-VERBINDUNG
+// =============================================================================
+struct ClientConnection {
+    uint32_t clientId = 0;
+    NetworkAddress address{};
+    std::chrono::steady_clock::time_point connectedTime;
+    std::chrono::steady_clock::time_point lastActivity;
+    std::unique_ptr<ReliableUdpChannel> reliableChannel;
+    bool authenticated = false;
+    std::string playerName;
+};
+
+// =============================================================================
+// NETWORK SERVER
+// =============================================================================
 class NetworkServer {
 public:
-    using PacketHandler = std::function<void(uint32_t clientId, std::span<const uint8_t> payload)>;
-    using ConnectHandler = std::function<void(uint32_t clientId)>;
-    using DisconnectHandler = std::function<void(uint32_t clientId)>;
+    static constexpr uint32_t INVALID_CLIENT_ID = 0xFFFFFFFF;
+    static constexpr uint32_t MAX_RETRIES = 5;
 
-private:
-    UdpSocket socket;
-    uint16_t port = 0;
-    bool running = false;
+    using PacketCallback = std::function<void(const PacketHeader&, std::span<const uint8_t>,
+                                               std::string_view, uint16_t)>;
 
-    std::unordered_map<uint32_t, ClientConnection> clients;
-    std::unordered_map<std::string, uint32_t> endpointToClientId;
-    uint32_t nextClientId = 1;
+    NetworkServer();
+    ~NetworkServer();
 
-    std::mutex clientsMutex;
-
-    // Handlers
-    PacketHandler packetHandler;
-    ConnectHandler connectHandler;
-    DisconnectHandler disconnectHandler;
-
-    // Config
-    float clientTimeout = 30.0f;  // Seconds
-    size_t maxClients = 1000;
-
-public:
-    NetworkServer() = default;
-    ~NetworkServer() { Shutdown(); }
+    NetworkServer(const NetworkServer&) = delete;
+    NetworkServer& operator=(const NetworkServer&) = delete;
 
     // ===================================================================
     // Lifecycle
     // ===================================================================
-    [[nodiscard]] bool Startup(uint16_t listenPort, size_t maxClients = 1000);
-    void Shutdown();
+    [[nodiscard]] bool Start(uint16_t port);
+    void Stop();
     [[nodiscard]] bool IsRunning() const { return running; }
 
     // ===================================================================
-    // Handlers
+    // Callback
     // ===================================================================
-    void SetPacketHandler(PacketHandler handler) { packetHandler = std::move(handler); }
-    void SetConnectHandler(ConnectHandler handler) { connectHandler = std::move(handler); }
-    void SetDisconnectHandler(DisconnectHandler handler) { disconnectHandler = std::move(handler); }
+    void SetPacketCallback(PacketCallback callback) { packetCallback = std::move(callback); }
 
     // ===================================================================
-    // I/O
+    // Update
     // ===================================================================
-    // Poll for incoming packets (non-blocking, call every tick)
-    void Poll();
-
-    // Send to specific client
-    [[nodiscard]] bool SendToClient(uint32_t clientId, std::span<const uint8_t> payload, bool reliable = true);
-
-    // Broadcast to all clients
-    void Broadcast(std::span<const uint8_t> payload, bool reliable = true);
-
-    // Broadcast to all except one
-    void BroadcastExcept(uint32_t excludeClientId, std::span<const uint8_t> payload, bool reliable = true);
+    void ProcessIncoming();
+    void ProcessRetransmissions();
 
     // ===================================================================
-    // Client Management
+    // Senden
     // ===================================================================
-    void DisconnectClient(uint32_t clientId);
-    [[nodiscard]] bool IsClientConnected(uint32_t clientId) const;
-    [[nodiscard]] size_t GetClientCount() const;
+    void SendPacket(const PacketHeader& header, std::span<const uint8_t> payload,
+                    std::string_view ip, uint16_t port);
+    void SendReliable(const PacketHeader& header, std::span<const uint8_t> payload,
+                      std::string_view ip, uint16_t port);
 
     // ===================================================================
-    // Stats
+    // ACK-Verarbeitung
     // ===================================================================
-    struct ServerStats {
-        uint64_t totalBytesSent = 0;
-        uint64_t totalBytesRecv = 0;
-        uint64_t totalPacketsSent = 0;
-        uint64_t totalPacketsRecv = 0;
-        float averageRtt = 0.0f;
-        float packetLossRate = 0.0f;
-    };
-    [[nodiscard]] ServerStats GetStats() const;
+    void ProcessAck(uint16_t ack, uint32_t ackBitmap);
+    [[nodiscard]] bool IsSequenceAcked(uint16_t sequence) const;
+
+    // ===================================================================
+    // Statistiken
+    // ===================================================================
+    [[nodiscard]] uint32_t GetClientCount() const { return static_cast<uint32_t>(clients.size()); }
+    [[nodiscard]] float GetAverageRtt() const;
 
 private:
-    [[nodiscard]] uint32_t GetOrCreateClientId(const Endpoint& endpoint);
-    void RemoveClient(uint32_t clientId);
-    void CleanupTimedOutClients();
+    UdpSocket udpSocket;
+    std::unordered_map<uint32_t, ClientConnection> clients;
+    mutable std::mutex clientMutex;
+
+    std::vector<PendingPacket> pendingPackets;
+    RttEstimator rttEstimator;
+
+    PacketCallback packetCallback;
+    uint32_t nextClientId = 1;
+    bool running = false;
+
+    void QueueReliablePacket(uint16_t sequence, std::span<const uint8_t> payload,
+                             std::string_view ip, uint16_t port);
 };
 
 } // namespace net
