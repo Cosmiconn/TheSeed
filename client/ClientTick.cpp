@@ -1,165 +1,239 @@
 // =============================================================================
-// client/ClientTick.cpp — Client Tick Implementation (STUB)
+// client/ClientTick.cpp — Client Game Loop Implementation (AP-32 Fix)
 // =============================================================================
 #include "ClientTick.h"
 #include "../core/Log.h"
-#include "../core/World.h"
-#include "../core/ECS.h"
-#include "../core/ByteBuffer.h"
-#include "../core/Types.h"
-#include "Connection.h"
+#include "../math/Vector.h"
 
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
-#include <cmath>
+#include <thread>
+#include <chrono>
 
-void RendererInit(GLuint& grassTex, GLuint& rockTex) {
-    // Minimal OpenGL init - will be replaced by AP-04
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+namespace client {
 
-    // Create simple colored textures
-    GLuint textures[2];
-    glGenTextures(2, textures);
-    grassTex = textures[0];
-    rockTex = textures[1];
+// =============================================================================
+// Construction / Destruction
+// =============================================================================
+ClientGame::ClientGame() = default;
 
-    // Grass texture (green)
-    uint8_t grassData[4] = {34, 139, 34, 255};
-    glBindTexture(GL_TEXTURE_2D, grassTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, grassData);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    // Rock texture (gray)
-    uint8_t rockData[4] = {128, 128, 128, 255};
-    glBindTexture(GL_TEXTURE_2D, rockTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rockData);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    AddLog("[Renderer] OpenGL legacy initialized.");
+ClientGame::~ClientGame() {
+    Shutdown();
 }
 
-void RendererShutdown(GLuint& grassTex, GLuint& rockTex) {
-    GLuint textures[2] = {grassTex, rockTex};
-    glDeleteTextures(2, textures);
-    grassTex = 0;
-    rockTex = 0;
-}
+// =============================================================================
+// Initialize
+// =============================================================================
+bool ClientGame::Initialize(std::string_view serverIp, uint16_t serverPort) {
+    // Create client ECS world
+    clientWorld = std::make_unique<ecs::EcsWorld>();
 
-void ProcessClientTick() {
-    // Process incoming server packets
-    if (clientSocket == INVALID_SOCKET) return;
+    // Create connection
+    connection = std::make_unique<UdpClientConnection>();
 
-    static std::vector<uint8_t> tcpBuffer;
-    char chunk[2048];
-    int rc = recv(clientSocket, chunk, sizeof(chunk), 0);
-    if (rc > 0) {
-        tcpBuffer.insert(tcpBuffer.end(), chunk, chunk + rc);
+    auto result = connection->Connect(serverIp, serverPort);
+    if (!result) {
+        AddLog("[Client] Failed to connect: {}", static_cast<int>(result.error()));
+        return false;
     }
 
-    while (tcpBuffer.size() >= 2) {
-        uint16_t pLen = (static_cast<uint16_t>(tcpBuffer[0]) << 8) | static_cast<uint16_t>(tcpBuffer[1]);
-        if (tcpBuffer.size() < static_cast<size_t>(2 + pLen)) break;
+    // Setup snapshot callback
+    connection->SetSnapshotCallback([this](const std::vector<SnapshotEntity>& snapshot) {
+        if (!interpolator) return;
 
-        std::vector<uint8_t> payload(tcpBuffer.begin() + 2, tcpBuffer.begin() + 2 + pLen);
-        tcpBuffer.erase(tcpBuffer.begin(), tcpBuffer.begin() + 2 + pLen);
+        // Convert snapshot to interpolation state
+        for (const auto& entity : snapshot) {
+            InterpState state{};
+            state.id = entity.id;
+            state.x = entity.x;
+            state.y = entity.y;
+            state.z = entity.z;
+            state.timestamp = std::chrono::duration<float>(
+                entity.receivedAt.time_since_epoch()).count();
 
-        // Process packet - minimal implementation
-        ByteBuffer buf{std::span<const uint8_t>(payload)};
-        try {
-            uint8_t op = buf.ReadUInt8();
-            switch (op) {
-                case std::to_underlying(PacketType::MSG_ENTITY_SPAWN): {
-                    uint32_t id = buf.ReadUInt32();
-                    std::string name = buf.ReadString();
-                    uint8_t isMonster = buf.ReadUInt8();
-                    float x = buf.ReadFloat();
-                    float z = buf.ReadFloat();
-                    std::string mat = buf.ReadString();
-                    float scale = buf.ReadFloat();
-                    std::string mesh = buf.ReadString();
+            interpolator->AddSnapshot(state.id, state);
+        }
+    });
 
-                    // Add to client registry
-                    Entity e;
-                    e.id = id;
-                    e.name = name;
-                    e.isMonster = isMonster != 0;
-                    e.transform.x = e.transform.lerpX = x;
-                    e.transform.z = e.transform.lerpZ = z;
-                    e.render.materialId = mat;
-                    e.render.scaleY = scale;
-                    e.render.meshId = mesh;
-                    e.transform.y = GetHeightFromGrid(x, z) + 0.5f;
+    // Setup interpolator
+    interpolator = std::make_unique<Interpolator>();
 
-                    auto it = std::ranges::find_if(clientRegistry,
-                        [id](const Entity& ent){ return ent.id == id; });
-                    if (it != clientRegistry.end()) *it = e;
-                    else clientRegistry.push_back(e);
-                    break;
-                }
-                case std::to_underlying(PacketType::MSG_ENTITY_DESPAWN): {
-                    uint32_t id = buf.ReadUInt32();
-                    clientRegistry.erase(
-                        std::ranges::remove_if(clientRegistry,
-                            [id](const Entity& e){ return e.id == id; }).begin(),
-                        clientRegistry.end());
-                    break;
-                }
-                case std::to_underlying(PacketType::MSG_MOVE_NOTIFY): {
-                    uint32_t id = buf.ReadUInt32();
-                    uint32_t seq = buf.ReadUInt32();
-                    (void)seq;
-                    float tx = buf.ReadFloat();
-                    float tz = buf.ReadFloat();
+    lastTick = std::chrono::steady_clock::now();
+    running.store(true);
 
-                    auto it = std::ranges::find_if(clientRegistry,
-                        [id](const Entity& e){ return e.id == id; });
-                    if (it != clientRegistry.end()) {
-                        it->transform.targetX = tx;
-                        it->transform.targetZ = tz;
-                    }
-                    break;
-                }
-                case std::to_underlying(PacketType::MSG_COMBAT_NOTIFY): {
-                    uint32_t id = buf.ReadUInt32();
-                    uint32_t hp = buf.ReadUInt32();
-                    auto it = std::ranges::find_if(clientRegistry,
-                        [id](const Entity& e){ return e.id == id; });
-                    if (it != clientRegistry.end()) it->currentHP = static_cast<int>(hp);
-                    break;
-                }
-                case std::to_underlying(PacketType::MSG_SECTOR_SWITCH): {
-                    uint32_t sx = buf.ReadUInt32();
-                    uint32_t sz = buf.ReadUInt32();
-                    float ex = buf.ReadFloat();
-                    float ez = buf.ReadFloat();
-                    currentSectorX = static_cast<int>(sx);
-                    currentSectorZ = static_cast<int>(sz);
-                    LoadHDTBinary(GetSectorName(currentSectorX, currentSectorZ) + ".hdt");
-                    AddLog("[Client] Sector switch to ({}, {})", currentSectorX, currentSectorZ);
-                    break;
-                }
-            }
-        } catch (...) {
-            // Invalid packet, ignore
+    AddLog("[Client] Game initialized, connected to {}:{}", serverIp, serverPort);
+    return true;
+}
+
+// =============================================================================
+// Shutdown
+// =============================================================================
+void ClientGame::Shutdown() {
+    running.store(false);
+    if (connection) {
+        connection->Disconnect();
+    }
+    AddLog("[Client] Game shutdown");
+}
+
+// =============================================================================
+// Main Loop — Fixed 60fps
+// =============================================================================
+void ClientGame::Run() {
+    while (running.load()) {
+        auto now = std::chrono::steady_clock::now();
+        float frameTime = std::chrono::duration<float>(now - lastTick).count();
+        lastTick = now;
+
+        // Cap frame time to prevent spiral of death
+        frameTime = std::min(frameTime, 0.25f);
+
+        accumulator += frameTime;
+
+        // Fixed update at 60Hz
+        while (accumulator >= TICK_RATE) {
+            FixedUpdate(TICK_RATE);
+            accumulator -= TICK_RATE;
+        }
+
+        // Render with interpolation
+        RenderFrame();
+
+        // Frame limit (optional, vsync preferred)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// =============================================================================
+// Fixed Update — 60Hz
+// =============================================================================
+void ClientGame::FixedUpdate(float deltaTime) {
+    if (!connection || !connection->IsConnected()) return;
+
+    // Update network (process incoming, retransmissions)
+    connection->Update(deltaTime);
+
+    // Update interpolation
+    if (interpolator) {
+        interpolator->Update(deltaTime);
+    }
+
+    // Update local player
+    UpdateLocalPlayer();
+
+    // Process snapshots into ECS world
+    ProcessSnapshots();
+}
+
+// =============================================================================
+// Process Snapshots — Apply interpolated state to ECS
+// =============================================================================
+void ClientGame::ProcessSnapshots() {
+    if (!clientWorld || !interpolator) return;
+
+    auto snapshot = connection->GetLastSnapshot();
+    if (snapshot.empty()) return;
+
+    for (const auto& entityData : snapshot) {
+        // Find or create entity
+        ecs::EntityHandle handle(entityData.id);
+
+        auto* transform = clientWorld->GetComponent<game::Transform>(handle);
+        if (!transform) {
+            clientWorld->AddComponent(handle, game::Transform{});
+            transform = clientWorld->GetComponent<game::Transform>(handle);
+        }
+
+        auto* health = clientWorld->GetComponent<game::Health>(handle);
+        if (!health) {
+            clientWorld->AddComponent(handle, game::Health{});
+            health = clientWorld->GetComponent<game::Health>(handle);
+        }
+
+        auto* name = clientWorld->GetComponent<game::Name>(handle);
+        if (!name) {
+            clientWorld->AddComponent(handle, game::Name{});
+            name = clientWorld->GetComponent<game::Name>(handle);
+        }
+
+        // Apply interpolated position
+        auto interpPos = interpolator->Interpolate(entityData.id);
+        if (interpPos) {
+            transform->x = interpPos->x;
+            transform->y = interpPos->y;
+            transform->z = interpPos->z;
+        } else {
+            // Fallback to snapshot position
+            transform->x = entityData.x;
+            transform->y = entityData.y;
+            transform->z = entityData.z;
+        }
+
+        // Apply health
+        health->current = static_cast<int>(entityData.currentHP);
+        health->max = static_cast<int>(entityData.maxHP);
+
+        // Apply name
+        if (name->name.empty() && !entityData.name.empty()) {
+            name->name = entityData.name;
         }
     }
+}
 
-    // Interpolate entity positions
-    for (auto& ent : clientRegistry) {
-        float dx = ent.transform.targetX - ent.transform.x;
-        float dz = ent.transform.targetZ - ent.transform.z;
-        float dist = std::sqrt(dx*dx + dz*dz);
-        if (dist > 0.01f) {
-            float speed = (ent.id == serverRegistry.empty() ? 0 : serverRegistry[0].id) 
-                          ? LERP_SPEED_SELF : LERP_SPEED_REMOTE;
-            float t = std::min(1.0f, speed * 0.016f);
-            ent.transform.x += dx * t;
-            ent.transform.z += dz * t;
-        }
-        ent.transform.y = GetHeightFromGrid(ent.transform.x, ent.transform.z) + 0.5f;
+// =============================================================================
+// Update Local Player
+// =============================================================================
+void ClientGame::UpdateLocalPlayer() {
+    if (!connection) return;
+
+    localEntityId = connection->GetLocalEntityId();
+
+    // Send move request if target changed
+    static float lastTargetX = 0.0f, lastTargetZ = 0.0f;
+    if (targetX != lastTargetX || targetZ != lastTargetZ) {
+        connection->SendMoveRequest(targetX, targetZ);
+        lastTargetX = targetX;
+        lastTargetZ = targetZ;
     }
 }
+
+// =============================================================================
+// Render Frame
+// =============================================================================
+void ClientGame::RenderFrame() {
+    // TODO: Integrate with actual renderer
+    // For now, just update the ECS world for the renderer to use
+
+    if (!clientWorld) return;
+
+    // Calculate interpolation ratio for visual smoothness
+    float alpha = accumulator / TICK_RATE;
+    (void)alpha; // Would be used by renderer for interpolation
+}
+
+// =============================================================================
+// Input Handling
+// =============================================================================
+void ClientGame::HandleMoveInput(float x, float z) {
+    targetX = x;
+    targetZ = z;
+}
+
+void ClientGame::HandleCombatInput(uint32_t targetId) {
+    if (connection) {
+        connection->SendCombatAction(targetId);
+    }
+}
+
+void ClientGame::HandleChatInput(std::string_view text) {
+    if (connection) {
+        // Use local player name as sender
+        connection->SendChatMessage("Player", text, 0); // 0 = global channel
+    }
+}
+
+void ClientGame::HandleInteractInput(uint32_t targetId) {
+    if (connection) {
+        connection->SendInteract(targetId);
+    }
+}
+
+} // namespace client
