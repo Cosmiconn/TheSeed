@@ -1,334 +1,321 @@
 // =============================================================================
-// server/Server.cpp — Updated for UDP + ECS + Multi-Threading (V13.2)
+// server/Server.cpp — Multi-Threaded Game Server Implementation
 // =============================================================================
 #include "Server.h"
-#include "Network.h"
 #include "PacketHandler.h"
+#include "Validation.h"
+#include "ThreadPool.h"
 #include "../core/GameSystems.h"
-#include "../core/World.h"
-#include "../core/Log.h"
-#include "../core/ECS.h"
-#include "../ecs/ecs_EcsWorld.h"
+#include "../core/EventSystem.h"
+#include "../core/EventTypes.h"
 
-#include <chrono>
-#include <format>
-
-// Legacy globals
-int dbFlushTimer = 0;
-std::unique_ptr<GameServer> gGameServer;
+#include <cstring>
 
 // =============================================================================
-// LEGACY: TCP Server (kept for compatibility during transition)
+// GLOBALE SERVER-INSTANZ
 // =============================================================================
-void ExecutePlayerLogout() {
-    if (serverRegistry.empty() || !GameDB) return;
-    for (const auto& ent : serverRegistry) {
-        if (ent.isMonster) continue;
-        PlayerProfile p;
-        SafeStrCopy(p.username,   ent.name, sizeof(p.username));
-        SafeStrCopy(p.lastSector, GetSectorName(currentSectorX, currentSectorZ),
-                    sizeof(p.lastSector));
-        p.level = ent.persistence.level;
-        p.gold  = ent.persistence.gold;
-        p.lastX = ent.transform.x;
-        p.lastY = ent.transform.y;
-        p.lastZ = ent.transform.z;
-        GameDB->Push(p);
-        GameDB->SaveQuestLog(ent.name, playerQuestLog[ent.id]);
-        {
-            std::lock_guard lock(inventoryMutex);
-            GameDB->SaveInventory(ent.name, playerInventories[ent.id]);
-        }
-        gEventBus.Publish(PlayerLoggedOutEvent{
-            .entityId = ent.id,
-            .name = ent.name
-        });
-    }
-    AddLog("[Persistenz] Alle Spielerdaten synchronisiert.");
-}
+std::unique_ptr<MultiThreadedServer> gGameServer;
 
 // =============================================================================
-// LEGACY: ProcessServerTick (TCP version - will be replaced by GameServer::Tick)
+// START
 // =============================================================================
-void ProcessServerTick(std::move_only_function<void()> rebuildGPU) {
-    if (serverListenSocket == INVALID_SOCKET) return;
-
-    // 1) Neue Client-Verbindungen annehmen (TCP - legacy)
-    {
-        std::lock_guard lock(sessionsMutex);
-        while (static_cast<int>(clientSessions.size()) < MAX_CLIENTS) {
-            SOCKET inc = accept(serverListenSocket, nullptr, nullptr);
-            if (inc == INVALID_SOCKET) break;
-
-            u_long nb = 1; ioctlsocket(inc, FIONBIO, &nb);
-
-            ClientSession s;
-            s.socket   = inc;
-            s.entityId = nextEntityId++;
-
-            Entity e;
-            e.id        = s.entityId;
-            e.isMonster = false;
-            e.name      = std::format("Hero_{}", e.id);
-
-            PlayerProfile prof;
-            if (GameDB && GameDB->GetProfile(e.name, prof)) {
-                e.persistence.level = prof.level;
-                e.persistence.gold  = prof.gold;
-                e.transform.x = prof.lastX;
-                e.transform.y = prof.lastY;
-                e.transform.z = prof.lastZ;
-            } else {
-                e.persistence.level = 1;
-                e.persistence.gold  = 100;
-                e.transform.x = 0.0f;
-                e.transform.y = 0.5f;
-                e.transform.z = 0.0f;
-            }
-            e.transform.targetX = e.transform.x;
-            e.transform.targetZ = e.transform.z;
-            e.render = { "mat_hero", 1.0f, "cube" };
-            serverRegistry.push_back(e);
-
-            {
-                std::lock_guard invLock(inventoryMutex);
-                auto& inv = playerInventories[e.id];
-                if (inv.empty()) {
-                    inv.resize(INVENTORY_SIZE);
-                    if (GameDB) GameDB->LoadInventory(e.name, inv);
-                    bool empty = inv[0].templateId == 0;
-                    if (empty) {
-                        invLock.~lock_guard();
-                        AddItemToPlayer(e.id, 10, 5);
-                        AddItemToPlayer(e.id, 50, 1);
-                    }
-                }
-            }
-
-            clientSessions.push_back(std::move(s));
-            AddLog("[Server] Client verbunden: {}", e.name);
-
-            gEventBus.Publish(PlayerLoggedInEvent{
-                .entityId = e.id,
-                .name = e.name,
-                .x = e.transform.x,
-                .y = e.transform.y,
-                .z = e.transform.z
-            });
-
-            ByteBuffer pkt; pkt.WriteUInt8(std::to_underlying(PacketType::MSG_ENTITY_SPAWN));
-            pkt.WriteUInt32(e.id); pkt.WriteString(e.name); pkt.WriteUInt8(0);
-            pkt.WriteFloat(e.transform.x); pkt.WriteFloat(e.transform.z);
-            pkt.WriteString(e.render.materialId);
-            pkt.WriteFloat(e.render.scaleY);
-            pkt.WriteString(e.render.meshId);
-            BroadcastToAll(std::span(pkt.data));
-        }
-    }
-
-    // 2) Eingehende Pakete lesen und routen (TCP - legacy)
-    {
-        std::lock_guard lock(sessionsMutex);
-        for (auto& session : clientSessions) {
-            if (session.socket == INVALID_SOCKET) continue;
-
-            char chunk[2048];
-            int  rc = recv(session.socket, chunk, sizeof(chunk), 0);
-            if (rc > 0) {
-                session.tcpBuffer.insert(session.tcpBuffer.end(), chunk, chunk + rc);
-            } else if (rc == 0 || (rc == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)) {
-                closesocket(session.socket);
-                session.socket = INVALID_SOCKET;
-                continue;
-            }
-
-            while (session.tcpBuffer.size() >= 2) {
-                uint16_t pLen =
-                    (static_cast<uint16_t>(session.tcpBuffer[0]) << 8) |
-                     static_cast<uint16_t>(session.tcpBuffer[1]);
-                if (session.tcpBuffer.size() < static_cast<size_t>(2 + pLen)) break;
-                std::vector<uint8_t> payload(
-                    session.tcpBuffer.begin() + 2,
-                    session.tcpBuffer.begin() + 2 + pLen);
-                session.tcpBuffer.erase(
-                    session.tcpBuffer.begin(),
-                    session.tcpBuffer.begin() + 2 + pLen);
-                ProcessPacketFromClient(session, std::span(payload));
-            }
-        }
-        clientSessions.erase(
-            std::ranges::remove_if(clientSessions,
-                [](const ClientSession& s){ return s.socket == INVALID_SOCKET; }).begin(),
-            clientSessions.end());
-    }
-
-    // 3) Welt-Simulation (ECS-ready)
-    for (auto& ent : serverRegistry) {
-        float dX = ent.transform.targetX - ent.transform.x;
-        float dZ = ent.transform.targetZ - ent.transform.z;
-        float d  = std::sqrt(dX*dX + dZ*dZ);
-        if (d > 0.05f) {
-            ent.transform.x += (dX / d) * 0.05f;
-            ent.transform.z += (dZ / d) * 0.05f;
-        }
-        ent.transform.y = GetHeightFromGrid(ent.transform.x, ent.transform.z) + 0.5f;
-    }
-
-    // 4) Subsystem-Ticks
-    auto bc = [](std::span<const uint8_t> d){ BroadcastToAll(d); };
-    ProcessRespawnQueue(TICK_DELTA);
-    ProcessStatusEffects(TICK_DELTA, bc);
-
-    // 5) DB-Flush
-    dbFlushTimer++;
-    if (dbFlushTimer >= DB_FLUSH_INTERVAL) {
-        dbFlushTimer = 0;
-        if (GameDB) GameDB->Flush();
-    }
-
-    // 6) Terrain-GPU rebuild (callback)
-    rebuildGPU();
-}
-
-// =============================================================================
-// NEW: GameServer UDP + Multi-Threaded Implementation (AP-32/33/42)
-// =============================================================================
-bool GameServer::Startup(uint16_t port, bool multiThreaded) {
-    network = std::make_unique<net::NetworkServer>();
-
-    network->SetConnectHandler([this](uint32_t clientId) {
-        OnClientConnected(clientId);
-    });
-
-    network->SetDisconnectHandler([this](uint32_t clientId) {
-        OnClientDisconnected(clientId);
-    });
-
-    network->SetPacketHandler([this](uint32_t clientId, std::span<const uint8_t> payload) {
-        OnPacketReceived(clientId, payload);
-    });
-
-    if (!network->Startup(port)) {
-        AddLog("[GameServer] Failed to start network server on port {}", port);
+bool MultiThreadedServer::Start(uint16_t port) {
+    if (!networkServer.Start(port)) {
+        AddLog("[Server] Netzwerk-Start fehlgeschlagen");
         return false;
     }
 
-    if (multiThreaded) {
-        threadedServer = std::make_unique<server::MultiThreadedServer>();
-        threadedServer->Startup(4); // 4 worker threads
-    }
+    networkServer.SetPacketCallback(
+        [this](const PacketHeader& header, std::span<const uint8_t> payload,
+               std::string_view ip, uint16_t port) {
+            OnPacketReceived(header, payload, ip, port);
+        });
 
-    running = true;
-    AddLog("[GameServer] UDP Server started on port {} (multi-threaded: {})", port, multiThreaded);
+    running.store(true);
+    serverThread = std::thread(&MultiThreadedServer::ServerLoop, this);
+
+    AddLog("[Server] MultiThreadedServer gestartet auf Port {}", port);
     return true;
 }
 
-void GameServer::Shutdown() {
-    running = false;
-    if (threadedServer) {
-        threadedServer->Shutdown();
-        threadedServer.reset();
+// =============================================================================
+// STOP
+// =============================================================================
+void MultiThreadedServer::Stop() {
+    running.store(false);
+    if (serverThread.joinable()) {
+        serverThread.join();
     }
-    if (network) {
-        network->Shutdown();
-        network.reset();
-    }
-    AddLog("[GameServer] Shutdown complete");
+    networkServer.Stop();
+    AddLog("[Server] MultiThreadedServer gestoppt");
 }
 
-void GameServer::Tick(float deltaTime) {
-    if (!running || !network) return;
+// =============================================================================
+// SERVER LOOP
+// =============================================================================
+void MultiThreadedServer::ServerLoop() {
+    auto lastTick = std::chrono::steady_clock::now();
 
-    // Poll network (this can be on main thread or network thread)
-    network->Poll();
+    while (running.load()) {
+        auto now = std::chrono::steady_clock::now();
+        float dt = std::chrono::duration<float>(now - lastTick).count();
+        lastTick = now;
 
-    // If multi-threaded, simulation runs on worker threads
-    if (threadedServer) {
-        threadedServer->NetworkTick(deltaTime);
-        threadedServer->SimulationTick(deltaTime);
+        // Eingehende Pakete verarbeiten
+        networkServer.ProcessIncoming();
+
+        // Retransmissions
+        networkServer.ProcessRetransmissions();
+
+        // Inaktive Sessions bereinigen
+        CleanupInactiveSessions(30.0f);
+
+        // Snapshot bauen und broadcasten (20Hz)
+        static float snapshotAccumulator = 0.0f;
+        snapshotAccumulator += dt;
+        if (snapshotAccumulator >= 0.05f) { // 20Hz
+            snapshotAccumulator -= 0.05f;
+            BuildAndBroadcastSnapshot();
+        }
+
+        // Frame-Rate Limitierung
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// =============================================================================
+// PACKET RECEIVED
+// =============================================================================
+void MultiThreadedServer::OnPacketReceived(const PacketHeader& header,
+                                            std::span<const uint8_t> payload,
+                                            std::string_view senderIp,
+                                            uint16_t senderPort) {
+    uint32_t sessionId = GetOrCreateSession(senderIp, senderPort);
+
+    {
+        std::lock_guard lock(sessionsMutex);
+        auto& session = udpSessions[sessionId];
+        session.lastActivity = std::chrono::steady_clock::now();
+        session.remoteSequence = header.sequence;
+    }
+
+    // ACK senden
+    PacketHeader ackHeader;
+    ackHeader.protocolId = 0x4D4D;
+    ackHeader.ack = header.sequence;
+    ackHeader.flags = static_cast<uint16_t>(PacketFlags::AckOnly);
+    networkServer.SendPacket(ackHeader, {}, senderIp, senderPort);
+
+    // Payload verarbeiten
+    if (!payload.empty() && !(header.flags & static_cast<uint16_t>(PacketFlags::AckOnly))) {
+        if (payload.size() >= 1) {
+            uint8_t packetType = payload[0];
+            ProcessPacket(sessionId, packetType, payload.subspan(1));
+        }
+    }
+}
+
+// =============================================================================
+// PROCESS PACKET
+// =============================================================================
+void MultiThreadedServer::ProcessPacket(uint32_t sessionId, uint8_t packetType,
+                                         std::span<const uint8_t> payload) {
+    uint32_t entityId = 0;
+    {
+        std::lock_guard lock(sessionsMutex);
+        auto it = udpSessions.find(sessionId);
+        if (it != udpSessions.end()) {
+            entityId = it->second.entityId;
+        }
+    }
+
+    switch (static_cast<PacketType>(packetType)) {
+        case PacketType::MSG_MOVE_REQUEST: {
+            if (payload.size() < 8) break;
+            float targetX, targetZ;
+            std::memcpy(&targetX, payload.data(), 4);
+            std::memcpy(&targetZ, payload.data() + 4, 4);
+
+            // Entity bewegen
+            if (gUseEcs && gEcsWorld) {
+                auto query = gEcsWorld->Query<PositionComponent, VelocityComponent>();
+                for (auto [e, pos, vel] : query) {
+                    (void)pos;
+                    auto* legacy = gEcsWorld->GetComponent<LegacyIdComponent>(e);
+                    if (legacy && legacy->legacyId == entityId) {
+                        vel.vx = (targetX - pos.x) * 5.0f;
+                        vel.vz = (targetZ - pos.z) * 5.0f;
+                        break;
+                    }
+                }
+            } else {
+                auto it = std::ranges::find_if(serverRegistry,
+                    [entityId](const Entity& e) { return e.id == entityId; });
+                if (it != serverRegistry.end()) {
+                    it->transform.targetX = targetX;
+                    it->transform.targetZ = targetZ;
+                }
+            }
+            break;
+        }
+
+        case PacketType::MSG_COMBAT_ACTION: {
+            if (payload.size() < 4) break;
+            uint32_t targetId;
+            std::memcpy(&targetId, payload.data(), 4);
+
+            // Kampf ausführen
+            if (entityId != 0 && targetId != 0) {
+                ApplyDamage(targetId, entityId, 10); // 10 Basis-Schaden
+            }
+            break;
+        }
+
+        case PacketType::MSG_CHAT: {
+            if (payload.size() < 1) break;
+            ByteBuffer buf(payload);
+            uint32_t channel = buf.ReadUInt32();
+            std::string sender = buf.ReadString();
+            std::string text = buf.ReadString();
+
+            AddChatMessage(sender, text, channel);
+            break;
+        }
+
+        case PacketType::MSG_INTERACT: {
+            if (payload.size() < 4) break;
+            uint32_t targetId;
+            std::memcpy(&targetId, payload.data(), 4);
+
+            // Interaktion verarbeiten
+            AddLog("[Server] Entity {} interagiert mit {}", entityId, targetId);
+            break;
+        }
+
+        default:
+            AddLog("[Server] Unbekannter Pakettyp: {}", static_cast<int>(packetType));
+            break;
+    }
+}
+
+// =============================================================================
+// SNAPSHOT BUILDING
+// =============================================================================
+void MultiThreadedServer::BuildAndBroadcastSnapshot() {
+    ByteBuffer snapshot;
+
+    // Snapshot-Header
+    snapshot.WriteUInt8(std::to_underlying(PacketType::MSG_SNAPSHOT));
+    snapshot.WriteFloat(static_cast<float>(
+        std::chrono::duration<float>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()));
+
+    if (gUseEcs && gEcsWorld) {
+        // ECS-Entities in Snapshot packen
+        auto query = gEcsWorld->Query<PositionComponent, HealthComponent>();
+        snapshot.WriteUInt32(static_cast<uint32_t>(query.Count()));
+
+        for (auto [entity, pos, health] : query) {
+            auto* legacy = gEcsWorld->GetComponent<LegacyIdComponent>(entity);
+            auto* name = gEcsWorld->GetComponent<NameComponent>(entity);
+            auto* render = gEcsWorld->GetComponent<RenderComponentECS>(entity);
+
+            uint32_t id = legacy ? legacy->legacyId : static_cast<uint32_t>(entity);
+            snapshot.WriteUInt32(id);
+            snapshot.WriteFloat(pos.x);
+            snapshot.WriteFloat(pos.y);
+            snapshot.WriteFloat(pos.z);
+            snapshot.WriteUInt32(static_cast<uint32_t>(health.currentHP));
+            snapshot.WriteUInt32(static_cast<uint32_t>(health.maxHP));
+            snapshot.WriteString(name ? name->name : "Unknown");
+            snapshot.WriteString(render ? render->materialId : "default");
+        }
     } else {
-        // Single-threaded fallback
-        // TODO: ECS System execution here (AP-22)
-        // TODO: Snapshot building and broadcast (AP-37)
+        // Legacy-Entities in Snapshot packen
+        snapshot.WriteUInt32(static_cast<uint32_t>(serverRegistry.size()));
+        for (const auto& ent : serverRegistry) {
+            snapshot.WriteUInt32(ent.id);
+            snapshot.WriteFloat(ent.transform.x);
+            snapshot.WriteFloat(ent.transform.y);
+            snapshot.WriteFloat(ent.transform.z);
+            snapshot.WriteUInt32(static_cast<uint32_t>(ent.currentHP));
+            snapshot.WriteUInt32(static_cast<uint32_t>(ent.maxHP));
+            snapshot.WriteString(ent.name);
+            snapshot.WriteString(ent.render.materialId);
+        }
     }
 
-    // Build and broadcast snapshot (AP-37)
-    if (gUseEcs && gEcsWorld && network->GetClientCount() > 0) {
-        // This would be done on sim thread in multi-threaded mode
-        // For now, do it here
-        // net::SnapshotBuilder builder(20.0f);
-        // auto snapshot = builder.BuildDelta(*gEcsWorld, 0);
-        // auto serialized = builder.Serialize(snapshot);
-        // network->Broadcast(serialized, false); // Unreliable for snapshots
+    // An alle Clients broadcasten
+    std::lock_guard lock(sessionsMutex);
+    for (const auto& [sessionId, session] : udpSessions) {
+        networkServer.SendReliable(
+            PacketHeader{.protocolId = 0x4D4D, .flags = static_cast<uint16_t>(PacketFlags::Reliable)},
+            std::span(snapshot.data),
+            session.ip,
+            session.port
+        );
     }
 }
 
-size_t GameServer::GetClientCount() const {
-    if (!network) return 0;
-    return network->GetClientCount();
-}
+// =============================================================================
+// SESSION MANAGEMENT
+// =============================================================================
+uint32_t MultiThreadedServer::GetOrCreateSession(std::string_view ip, uint16_t port) {
+    std::lock_guard lock(sessionsMutex);
 
-void GameServer::BroadcastSnapshot(std::span<const uint8_t> snapshotData) {
-    if (!network) return;
-    network->Broadcast(snapshotData, false); // Unreliable for snapshots
-}
-
-void GameServer::OnClientConnected(uint32_t clientId) {
-    AddLog("[GameServer] Client {} connected", clientId);
-
-    // Create player entity in ECS (if ECS mode enabled)
-    if (gUseEcs && gEcsWorld) {
-        auto handle = gEcsWorld->CreateEntity();
-        gEcsWorld->AddComponent(handle, game::Transform{.x = 0.0f, .y = 0.5f, .z = 0.0f});
-        gEcsWorld->AddComponent(handle, game::Health{.current = 100, .max = 100});
-        gEcsWorld->AddComponent(handle, game::Renderable{.materialId = "mat_hero", .meshId = "cube"});
-        gEcsWorld->AddComponent(handle, game::PlayerTag{.clientId = clientId});
+    // Suche existierende Session
+    for (const auto& [id, session] : udpSessions) {
+        if (session.ip == ip && session.port == port) {
+            return id;
+        }
     }
 
-    // Legacy: create entity in serverRegistry
-    Entity e;
-    e.id = nextEntityId++;
-    e.isMonster = false;
-    e.name = std::format("Hero_{}", clientId);
-    e.persistence.level = 1;
-    e.persistence.gold = 100;
-    e.transform.x = 0.0f;
-    e.transform.y = 0.5f;
-    e.transform.z = 0.0f;
-    e.render = {"mat_hero", 1.0f, "cube"};
-    serverRegistry.push_back(e);
+    // Neue Session erstellen
+    static uint32_t nextSessionId = 1;
+    uint32_t id = nextSessionId++;
+
+    UdpClientSession session;
+    session.ip = std::string(ip);
+    session.port = port;
+    session.lastActivity = std::chrono::steady_clock::now();
+
+    udpSessions[id] = std::move(session);
+    AddLog("[Server] Neue UDP-Session {} von {}:{}", id, ip, port);
+
+    return id;
 }
 
-void GameServer::OnClientDisconnected(uint32_t clientId) {
-    AddLog("[GameServer] Client {} disconnected", clientId);
+void MultiThreadedServer::RemoveSession(uint32_t sessionId) {
+    std::lock_guard lock(sessionsMutex);
+    udpSessions.erase(sessionId);
+    AddLog("[Server] Session {} entfernt", sessionId);
+}
 
-    // Remove from ECS
-    if (gUseEcs && gEcsWorld) {
-        auto query = gEcsWorld->Query<ecs::All<game::PlayerTag>>();
-        for (auto [handle] : query) {
-            auto* tag = gEcsWorld->GetComponent<game::PlayerTag>(handle);
-            if (tag && tag->clientId == clientId) {
-                gEcsWorld->DestroyEntity(handle);
-                break;
+void MultiThreadedServer::CleanupInactiveSessions(float maxInactiveTime) {
+    auto now = std::chrono::steady_clock::now();
+    std::vector<uint32_t> toRemove;
+
+    {
+        std::lock_guard lock(sessionsMutex);
+        for (const auto& [id, session] : udpSessions) {
+            auto inactive = std::chrono::duration<float>(now - session.lastActivity).count();
+            if (inactive > maxInactiveTime) {
+                toRemove.push_back(id);
             }
         }
     }
 
-    // Remove from serverRegistry
-    std::erase_if(serverRegistry, [clientId](const Entity& e) {
-        return e.id == clientId; // Simplified - should map clientId to entityId properly
-    });
+    for (uint32_t id : toRemove) {
+        RemoveSession(id);
+    }
 }
 
-void GameServer::OnPacketReceived(uint32_t clientId, std::span<const uint8_t> payload) {
-    // Route to packet handler
-    // In multi-threaded mode, queue for sim thread
-    if (threadedServer) {
-        threadedServer->QueuePacketForSimulation(std::vector<uint8_t>(payload.begin(), payload.end()));
-    } else {
-        // Direct processing (single-threaded)
-        // TODO: Map clientId to ClientSession and call ProcessPacketFromClient
-        (void)clientId;
-        (void)payload;
+// =============================================================================
+// GLOBALE SERVER TICK FUNKTION
+// =============================================================================
+void ProcessServerTick() {
+    if (gGameServer && gGameServer->IsRunning()) {
+        // Server läuft in eigenem Thread
+        // Hier können zusätzliche Main-Thread-Operationen ausgeführt werden
     }
 }

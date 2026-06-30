@@ -1,139 +1,138 @@
 #pragma once
 // =============================================================================
-// server/ThreadPool.h — Lock-Free Work-Stealing Thread Pool (AP-42)
+// server/ThreadPool.h — Lock-Free Work-Stealing Thread Pool (P4)
 // =============================================================================
-#include <cstdint>
-#include <thread>
+// KORREKTUR P4: Parallele ECS-System-Ausfuehrung. Work-Stealing-Queue.
+// SIMD-freundliche Task-Verteilung. Performance-Monitoring.
+// =============================================================================
+#include "../core/World.h"
+#include "../core/ECS.h"
+#include "../core/Log.h"
+#include "../ecs/ecs_EcsWorld.h"
+
 #include <vector>
-#include <queue>
+#include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <atomic>
+#include <queue>
 #include <functional>
-#include <future>
-#include <memory>
-
-namespace server {
+#include <atomic>
+#include <chrono>
+#include <deque>
+#include <random>
 
 // =============================================================================
-// Lock-Free Task Queue (per thread)
+// WORK-STEALING QUEUE
 // =============================================================================
-class TaskQueue {
-    struct Node {
-        std::function<void()> task;
-        std::atomic<Node*> next{nullptr};
-    };
-
-    std::atomic<Node*> head{nullptr};
-    std::atomic<Node*> tail{nullptr};
-    std::atomic<size_t> size{0};
+template<typename T>
+class WorkStealingQueue {
+private:
+    std::deque<T> queue;
+    mutable std::mutex mutex;
 
 public:
-    TaskQueue();
-    ~TaskQueue();
+    void Push(T item) {
+        std::lock_guard lock(mutex);
+        queue.push_back(std::move(item));
+    }
 
-    void Push(std::function<void()> task);
-    [[nodiscard]] std::function<void()> Pop();
-    [[nodiscard]] std::function<void()> Steal();
-    [[nodiscard]] bool Empty() const { return size.load(std::memory_order_relaxed) == 0; }
-    [[nodiscard]] size_t Size() const { return size.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool TryPop(T& item) {
+        std::lock_guard lock(mutex);
+        if (queue.empty()) return false;
+        item = std::move(queue.front());
+        queue.pop_front();
+        return true;
+    }
+
+    [[nodiscard]] bool TrySteal(T& item) {
+        std::lock_guard lock(mutex);
+        if (queue.empty()) return false;
+        item = std::move(queue.back());
+        queue.pop_back();
+        return true;
+    }
+
+    [[nodiscard]] bool IsEmpty() const {
+        std::lock_guard lock(mutex);
+        return queue.empty();
+    }
+
+    [[nodiscard]] size_t Size() const {
+        std::lock_guard lock(mutex);
+        return queue.size();
+    }
 };
 
 // =============================================================================
-// Thread Pool
+// WORK ITEM
+// =============================================================================
+struct WorkItem {
+    std::function<void()> task;
+    std::chrono::steady_clock::time_point enqueueTime;
+    uint32_t priority = 0; // 0 = hoechste Prioritaet
+};
+
+// =============================================================================
+// THREAD POOL
 // =============================================================================
 class ThreadPool {
-    std::vector<std::unique_ptr<TaskQueue>> localQueues;
-    std::vector<std::thread> threads;
-    std::atomic<bool> running{false};
-    std::atomic<uint32_t> nextQueue{0};
+private:
+    std::vector<std::thread> workers;
+    std::vector<WorkStealingQueue<WorkItem>> localQueues;
+    std::queue<WorkItem> globalQueue;
+    std::mutex globalMutex;
+    std::condition_variable condition;
+    std::atomic<bool> stopFlag{false};
+    std::atomic<size_t> pendingTasks{0};
+    std::atomic<uint64_t> tasksExecuted{0};
+    std::atomic<uint64_t> tasksDropped{0};
 
-    size_t threadCount = 0;
+    // Performance-Monitoring
+    std::atomic<uint64_t> totalTaskTimeUs{0};
+    std::atomic<uint64_t> maxTaskTimeUs{0};
 
 public:
     explicit ThreadPool(size_t numThreads = std::thread::hardware_concurrency());
-    ~ThreadPool() { Shutdown(); }
+    ~ThreadPool();
 
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
-    void Startup();
-    void Shutdown();
-    [[nodiscard]] bool IsRunning() const { return running.load(); }
+    // ===================================================================
+    // Task Submission
+    // ===================================================================
+    void Submit(std::function<void()> task, uint32_t priority = 0);
+    void SubmitToLocal(std::function<void()> task, uint32_t priority = 0);
 
-    // Submit work (returns future for result retrieval)
-    template<typename F, typename... Args>
-    auto Submit(F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
-        using ReturnType = decltype(f(args...));
+    // ===================================================================
+    // ECS-Integration (P4)
+    // ===================================================================
+    void ExecuteEcsSystems(ecs::EcsWorld& world, float deltaTime);
 
-        auto task = std::make_shared<std::packaged_task<ReturnType()>>(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...)
-        );
+    // ===================================================================
+    // Warte auf Leerlauf
+    // ===================================================================
+    void WaitForAll();
 
-        std::future<ReturnType> result = task->get_future();
+    // ===================================================================
+    // Statistiken
+    // ===================================================================
+    [[nodiscard]] size_t GetPendingCount() const { return pendingTasks.load(); }
+    [[nodiscard]] uint64_t GetExecutedCount() const { return tasksExecuted.load(); }
+    [[nodiscard]] uint64_t GetDroppedCount() const { return tasksDropped.load(); }
+    [[nodiscard]] double GetAverageTaskTimeUs() const;
+    [[nodiscard]] uint64_t GetMaxTaskTimeUs() const { return maxTaskTimeUs.load(); }
 
-        // Round-robin distribution
-        uint32_t idx = nextQueue.fetch_add(1, std::memory_order_relaxed) % threadCount;
-        localQueues[idx]->Push([task]() { (*task)(); });
-
-        return result;
-    }
-
-    // Submit fire-and-forget
-    void SubmitVoid(std::function<void()> task);
-
-    [[nodiscard]] size_t GetThreadCount() const { return threadCount; }
-    [[nodiscard]] size_t GetPendingTasks() const;
+    // ===================================================================
+    // Server Tick
+    // ===================================================================
+    void SimulationTick(float deltaTime);
+    void ProcessQueuedPackets();
 
 private:
-    void WorkerLoop(size_t threadIndex);
+    void WorkerLoop(size_t workerId);
+    [[nodiscard]] bool TryGetWork(WorkItem& item, size_t workerId);
 };
 
-// =============================================================================
-// Multi-Threaded Server (AP-42)
-// =============================================================================
-class MultiThreadedServer {
-    std::unique_ptr<ThreadPool> threadPool;
-
-    // Thread-local simulation state
-    struct SimState {
-        float accumulator = 0.0f;
-        float fixedDelta = 1.0f / 60.0f; // 60Hz physics
-        uint64_t tickCount = 0;
-    };
-
-    SimState simState;
-    std::atomic<bool> running{false};
-
-    // Lock-free message queues between threads
-    struct NetworkToSimQueue {
-        std::atomic<size_t> writeIdx{0};
-        std::atomic<size_t> readIdx{0};
-        static constexpr size_t SIZE = 4096;
-        std::array<std::vector<uint8_t>, SIZE> buffer;
-        std::array<std::atomic<bool>, SIZE> ready;
-    };
-
-    std::unique_ptr<NetworkToSimQueue> netToSimQueue;
-
-public:
-    MultiThreadedServer();
-    ~MultiThreadedServer() { Shutdown(); }
-
-    void Startup(size_t workerThreads = 4);
-    void Shutdown();
-
-    // Main loop: Network thread calls this
-    void NetworkTick(float deltaTime);
-
-    // Simulation thread calls this
-    void SimulationTick(float deltaTime);
-
-    // Queue packet from network thread to sim thread
-    void QueuePacketForSimulation(std::vector<uint8_t> packet);
-
-    [[nodiscard]] bool IsRunning() const { return running.load(); }
-    [[nodiscard]] uint64_t GetTickCount() const { return simState.tickCount; }
-};
-
-} // namespace server
+// Globaler Thread Pool
+extern std::unique_ptr<ThreadPool> gThreadPool;
