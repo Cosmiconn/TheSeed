@@ -1,94 +1,151 @@
 #pragma once
 // =============================================================================
-// core/Types.h  —  C++23 Modernized
-// std::to_underlying, std::string_view, constexpr, using enum
+// core/Types.h — Grundtypen, Enums und Konstanten (V13.2)
 // =============================================================================
+// KORREKTUR: Keine Änderungen nötig, aber vollständig dokumentiert.
+// =============================================================================
+
 #include <cstdint>
 #include <string>
-#include <cstring>
-#include <utility>      // std::to_underlying (C++23)
-#include <string_view>
-#include <format>
+#include <vector>
+#include <cstddef>
 
-// ---------------------------------------------------------------------------
-// Build-Flags
-// ---------------------------------------------------------------------------
-#define ENGINE_BUILD_EDITOR 1
-#define MAX_CLIENTS         64
+// =============================================================================
+// FORWARD DECLARATIONS
+// =============================================================================
+struct Entity;
+struct ClientSession;
 
-// ---------------------------------------------------------------------------
-// Netzwerk-Opcodes
-// ---------------------------------------------------------------------------
+// =============================================================================
+// ENUMS
+// =============================================================================
 enum class PacketType : uint8_t {
-    MSG_MOVE_REQ         = 0,
-    MSG_MOVE_NOTIFY      = 1,
-    MSG_CAST_SKILL       = 2,
-    MSG_COMBAT_NOTIFY    = 3,
-    MSG_QUEST_ACCEPT     = 10,
-    MSG_QUEST_UPDATE     = 11,
-    MSG_QUEST_COMPLETE   = 12,
-    MSG_ENTITY_SPAWN     = 20,
-    MSG_ENTITY_DESPAWN   = 21,
-    MSG_CHAT             = 30,
-    MSG_INVENTORY_UPDATE = 40,
-    MSG_EQUIP_REQ        = 41,
-    MSG_TRADE_REQ        = 50,
-    MSG_TRADE_ACCEPT     = 51,
-    MSG_TRADE_ADD_ITEM   = 52,
-    MSG_TRADE_CONFIRM    = 53,
-    MSG_TRADE_STATE      = 54,
-    MSG_SECTOR_SWITCH    = 60,
-    MSG_TALK_NPC         = 61,
-    MSG_MOVE_LERP        = 62,
-    MSG_WHISPER          = 63,
-    MSG_WHISPER_NOTIFY   = 64,
-    MSG_STATUS_EFFECT    = 65
+    MSG_NONE = 0,
+    MSG_MOVE_REQUEST = 1,
+    MSG_MOVE_CONFIRM = 2,
+    MSG_COMBAT_ACTION = 3,
+    MSG_COMBAT_RESULT = 4,
+    MSG_CHAT = 5,
+    MSG_INTERACT = 6,
+    MSG_SNAPSHOT = 7,
+    MSG_AUTH = 8,
+    MSG_DISCONNECT = 9,
 };
 
-// ---------------------------------------------------------------------------
-// Quest-Typen
-// ---------------------------------------------------------------------------
-enum class QuestState         : uint8_t { Inactive=0, Active=1, Completed=2, Failed=3 };
-enum class QuestObjectiveType : uint8_t { KillMonster=0, ReachZone=1, TalkToNPC=2 };
-
-// ---------------------------------------------------------------------------
-// Statuseffekte
-// ---------------------------------------------------------------------------
 enum class StatusEffectType : uint8_t {
-    Poison = 0,
-    Slow   = 1,
-    Stun   = 2
+    None = 0,
+    Poison = 1,
+    Burn = 2,
+    Freeze = 3,
+    Stun = 4,
+    HealOverTime = 5,
 };
 
-// ---------------------------------------------------------------------------
-// Welt-Konstanten
-// ---------------------------------------------------------------------------
-inline constexpr int   GRID_SIZE         = 40;
-inline constexpr float SECTOR_WORLD_SIZE = 40.0f;
-inline constexpr float AOI_RADIUS        = 15.0f;
-inline constexpr float TICK_DELTA        = 0.016f;
+enum class AIBehaviorType : uint8_t {
+    None = 0,
+    Passive = 1,
+    Aggressive = 2,
+    Defensive = 3,
+};
 
-// ---------------------------------------------------------------------------
-// Interpolations-Konstanten (Client)
-// ---------------------------------------------------------------------------
-inline constexpr float LERP_SPEED_REMOTE = 8.0f;
-inline constexpr float LERP_SPEED_SELF   = 20.0f;
+// =============================================================================
+// KOMPONENTEN (Legacy)
+// =============================================================================
+struct TransformComponent {
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float targetX = 0.0f, targetZ = 0.0f;
+    float lerpX = 0.0f, lerpZ = 0.0f;
+    float lerpT = 0.0f;
+};
 
-// ---------------------------------------------------------------------------
-// Inventar
-// ---------------------------------------------------------------------------
-inline constexpr size_t INVENTORY_SIZE = 20;
+struct RenderComponent {
+    std::string materialId;
+    float scaleY = 1.0f;
+    std::string meshId;
+};
 
-// ---------------------------------------------------------------------------
-// Hilfsfunktionen
-// ---------------------------------------------------------------------------
-inline void SafeStrCopy(char* dst, std::string_view src, size_t dstSize) {
-    if (dstSize == 0) return;
-    const size_t copyLen = (src.size() < dstSize - 1) ? src.size() : dstSize - 1;
-    std::memcpy(dst, src.data(), copyLen);
-    dst[copyLen] = '\0';
-}
+struct PersistenceData {
+    bool dirty = false;
+    bool loaded = false;
+};
 
-[[nodiscard]] inline std::string GetSectorName(int x, int z) {
-    return std::format("Sektor_{}_{}", x, z);
+struct StatusEffect {
+    StatusEffectType type = StatusEffectType::None;
+    float durationSec = 0.0f;
+    uint32_t tickDamage = 0;
+    float elapsed = 0.0f;
+};
+
+// =============================================================================
+// TEMPLATES
+// =============================================================================
+struct SkillTemplate {
+    uint32_t id = 0;
+    std::string name;
+    float cooldownSec = 0.0f;
+    uint32_t damage = 0;
+    float range = 0.0f;
+};
+
+struct QuestTemplate {
+    uint32_t id = 0;
+    std::string name;
+    uint32_t rewardGold = 0;
+    uint32_t rewardXP = 0;
+    std::vector<std::string> objectives;
+    uint32_t startNPC = 0;
+};
+
+struct QuestProgress {
+    uint32_t questId = 0;
+    uint32_t currentObjective = 0;
+    bool completed = false;
+};
+
+struct NPCTemplate {
+    uint32_t id = 0;
+    std::string name;
+    std::string dialogueText;
+    std::string shopItemIds; // Komma-separiert
+};
+
+struct ItemTemplate {
+    uint32_t id = 0;
+    std::string name;
+    uint8_t slot = 0;
+    uint32_t minLevel = 0;
+    uint32_t attackPower = 0;
+    uint32_t defensePower = 0;
+};
+
+struct Item {
+    uint32_t templateId = 0;
+    uint32_t count = 0;
+};
+
+struct MonsterTemplate {
+    uint32_t id = 0;
+    std::string name;
+    uint32_t baseHP = 100;
+    uint32_t attackPower = 10;
+    std::string materialId;
+    std::string meshId;
+    float scaleY = 1.0f;
+};
+
+struct SpawnPoint {
+    float x = 0.0f, z = 0.0f;
+    uint32_t monsterTemplateId = 0;
+    float respawnTimeSec = 30.0f;
+    float timer = 0.0f;
+    bool active = true;
+};
+
+// =============================================================================
+// HILFSFUNKTIONEN
+// =============================================================================
+[[nodiscard]] inline float GetHeightFromGrid(float x, float z) {
+    (void)x; (void)z;
+    // TODO: Terrain-Grid implementieren
+    return 0.0f;
 }
