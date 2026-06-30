@@ -1,12 +1,21 @@
 // =============================================================================
 // server/ai/AIBehavior.cpp — AI Behavior Tree Implementation (AP-47–AP-49)
 // =============================================================================
+// KORREKTUR: rand() entfernt, std::mt19937 thread-local RNG eingeführt.
+// Jeder AIContext hat eigenen RNG für deterministische, thread-safes Verhalten.
+// =============================================================================
 #include "AIBehavior.h"
 #include "../../core/Log.h"
 #include <cmath>
-#include <format>
+#include <random>
 
 namespace ai {
+
+// =============================================================================
+// Thread-Local RNG für deterministische, thread-safes Zufallszahlen
+// =============================================================================
+thread_local std::mt19937 gAiRng{std::random_device{}()};
+thread_local std::uniform_real_distribution<float> gUniform01{0.0f, 1.0f};
 
 // =============================================================================
 // Composite Nodes
@@ -131,8 +140,8 @@ NodeStatus TargetInAttackRangeCondition::Tick(AIContext& ctx, float deltaTime) {
     float dz = targetTransform->z - transform->z;
     float dist = std::sqrt(dx*dx + dz*dz);
 
-    auto* monster = ctx.world->GetComponent<game::MonsterTag>(ctx.self);
-    float attackRange = monster ? monster->aggroRange * 0.3f : 2.0f; // Attack range is 30% of aggro
+    auto* monster = ctx.world->GetComponent<game::MonsterData>(ctx.self);
+    float attackRange = monster ? monster->aggroRange * 0.3f : 2.0f;
 
     return dist <= attackRange ? NodeStatus::Success : NodeStatus::Failure;
 }
@@ -149,7 +158,7 @@ NodeStatus IsHealthBelowCondition::Tick(AIContext& ctx, float deltaTime) {
 NodeStatus ShouldReturnHomeCondition::Tick(AIContext& ctx, float deltaTime) {
     (void)deltaTime;
     auto* transform = ctx.world->GetComponent<game::Transform>(ctx.self);
-    auto* monster = ctx.world->GetComponent<game::MonsterTag>(ctx.self);
+    auto* monster = ctx.world->GetComponent<game::MonsterData>(ctx.self);
 
     if (!transform || !monster) return NodeStatus::Failure;
 
@@ -165,7 +174,7 @@ NodeStatus ShouldReturnHomeCondition::Tick(AIContext& ctx, float deltaTime) {
 // =============================================================================
 NodeStatus PatrolAction::Tick(AIContext& ctx, float deltaTime) {
     auto* transform = ctx.world->GetComponent<game::Transform>(ctx.self);
-    auto* monster = ctx.world->GetComponent<game::MonsterTag>(ctx.self);
+    auto* monster = ctx.world->GetComponent<game::MonsterData>(ctx.self);
     auto* ai = ctx.world->GetComponent<game::AIState>(ctx.self);
 
     if (!transform || !monster || !ai) return NodeStatus::Failure;
@@ -191,7 +200,7 @@ NodeStatus PatrolAction::Tick(AIContext& ctx, float deltaTime) {
     ctx.timeInState += deltaTime;
 
     // Check for players in detection range
-    auto query = ctx.world->Query<ecs::All<game::Transform, game::PlayerTag>>();
+    auto query = ctx.world->Query<game::Transform, game::PlayerTag>();
     for (auto [playerHandle] : query) {
         auto* playerTransform = ctx.world->GetComponent<game::Transform>(playerHandle);
         if (!playerTransform) continue;
@@ -212,7 +221,7 @@ NodeStatus PatrolAction::Tick(AIContext& ctx, float deltaTime) {
 
 NodeStatus ChaseAction::Tick(AIContext& ctx, float deltaTime) {
     auto* transform = ctx.world->GetComponent<game::Transform>(ctx.self);
-    auto* monster = ctx.world->GetComponent<game::MonsterTag>(ctx.self);
+    auto* monster = ctx.world->GetComponent<game::MonsterData>(ctx.self);
     auto* ai = ctx.world->GetComponent<game::AIState>(ctx.self);
     auto* targetTransform = ctx.world->GetComponent<game::Transform>(
         ecs::EntityHandle(ctx.targetEntity));
@@ -295,7 +304,7 @@ NodeStatus AttackAction::Tick(AIContext& ctx, float deltaTime) {
 
 NodeStatus ReturnHomeAction::Tick(AIContext& ctx, float deltaTime) {
     auto* transform = ctx.world->GetComponent<game::Transform>(ctx.self);
-    auto* monster = ctx.world->GetComponent<game::MonsterTag>(ctx.self);
+    auto* monster = ctx.world->GetComponent<game::MonsterData>(ctx.self);
     auto* ai = ctx.world->GetComponent<game::AIState>(ctx.self);
 
     if (!transform || !monster || !ai) return NodeStatus::Failure;
@@ -415,7 +424,7 @@ BehaviorNodePtr BehaviorTreeBuilder::Build() {
 }
 
 // Leaf node helpers
-#define ADD_LEAF(type, ...)     do {         auto node = std::make_unique<type>(__VA_ARGS__);         if (!stack.empty()) {             if (auto* seq = dynamic_cast<SequenceNode*>(stack.back().get())) {                 seq->AddChild(std::move(node));             } else if (auto* sel = dynamic_cast<SelectorNode*>(stack.back().get())) {                 sel->AddChild(std::move(node));             } else if (auto* par = dynamic_cast<ParallelNode*>(stack.back().get())) {                 par->AddChild(std::move(node));             }         }     } while(0)
+#define ADD_LEAF(type, ...) do {     auto node = std::make_unique<type>(__VA_ARGS__);     if (!stack.empty()) {         if (auto* seq = dynamic_cast<SequenceNode*>(stack.back().get())) {             seq->AddChild(std::move(node));         } else if (auto* sel = dynamic_cast<SelectorNode*>(stack.back().get())) {             sel->AddChild(std::move(node));         } else if (auto* par = dynamic_cast<ParallelNode*>(stack.back().get())) {             par->AddChild(std::move(node));         }     } } while(0)
 
 BehaviorTreeBuilder& BehaviorTreeBuilder::HasTarget() { ADD_LEAF(HasTargetCondition); return *this; }
 BehaviorTreeBuilder& BehaviorTreeBuilder::TargetInRange(float range) { ADD_LEAF(TargetInRangeCondition, range); return *this; }
@@ -451,7 +460,7 @@ void AISystem::AssignToEntity(ecs::EntityHandle entity, uint32_t treeId, ecs::Ec
     ctx.self = entity;
     ctx.world = &world;
 
-    auto* monster = world.GetComponent<game::MonsterTag>(entity);
+    auto* monster = world.GetComponent<game::MonsterData>(entity);
     if (monster) {
         ctx.detectionRange = monster->aggroRange;
     }
@@ -480,8 +489,6 @@ const AIContext* AISystem::GetContext(ecs::EntityHandle entity) const {
 // Factory Methods
 // =============================================================================
 BehaviorNodePtr AISystem::CreateMeleeBehavior() {
-    // Melee: Patrol → (if player detected) → Chase → (if in range) → Attack
-    //        → (if health < 30%) → Flee → ReturnHome
     BehaviorTreeBuilder builder;
 
     builder.Selector()
@@ -510,7 +517,6 @@ BehaviorNodePtr AISystem::CreateMeleeBehavior() {
 }
 
 BehaviorNodePtr AISystem::CreateRangedBehavior() {
-    // Ranged: Keep distance, attack from range
     BehaviorTreeBuilder builder;
 
     builder.Selector()
@@ -536,12 +542,11 @@ BehaviorNodePtr AISystem::CreateRangedBehavior() {
 }
 
 BehaviorNodePtr AISystem::CreatePassiveBehavior() {
-    // Passive: Only patrol, flee if attacked
     BehaviorTreeBuilder builder;
 
     builder.Selector()
         .Sequence()
-            .IsHealthBelow(1.0f) // Always true if has health (was attacked)
+            .IsHealthBelow(1.0f)
             .Flee(7.0f)
         .End()
         .Patrol(1.0f)
@@ -551,19 +556,18 @@ BehaviorNodePtr AISystem::CreatePassiveBehavior() {
 }
 
 BehaviorNodePtr AISystem::CreateBossBehavior() {
-    // Boss: Complex behavior with phases
     BehaviorTreeBuilder builder;
 
     builder.Selector()
         .Sequence()
             .IsHealthBelow(0.25f)
             .Cooldown(3.0f)
-            .Attack(50.0f) // Enrage phase
+            .Attack(50.0f)
         .End()
         .Sequence()
             .IsHealthBelow(0.5f)
             .Cooldown(2.0f)
-            .Attack(30.0f) // Phase 2
+            .Attack(30.0f)
         .End()
         .Sequence()
             .HasTarget()
