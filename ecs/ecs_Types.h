@@ -1,62 +1,64 @@
 #pragma once
 // =============================================================================
-// ecs/Types.h — ECS Core Type System
-// AP-20: Archetype Storage
+// ecs/ecs_Types.h — ECS-Kerntypen (AP-20)
+// =============================================================================
+// KORREKTUR: Vollständige Typ-Definitionen für das ECS.
 // =============================================================================
 #include <cstdint>
-#include <typeindex>
-#include <vector>
+#include <cstddef>
 #include <bitset>
-#include <array>
 
 namespace ecs {
 
-// Maximum components per archetype
-inline constexpr size_t MAX_COMPONENTS = 64;
+// =============================================================================
+// ENTITY HANDLE
+// =============================================================================
+using EntityHandle = uint32_t;
+constexpr EntityHandle INVALID_ENTITY = 0;
+constexpr size_t MAX_COMPONENTS = 64;
 
-// Component type identifier using type_index hashing
-using ComponentTypeId = size_t;
+// =============================================================================
+// KOMPONENTEN-TYP-ID
+// =============================================================================
+using ComponentTypeId = uint8_t;
+constexpr ComponentTypeId INVALID_COMPONENT_TYPE = 255;
 
-// Entity identifier: index + generation for safe recycling
-struct EntityHandle {
-    uint32_t index = UINT32_MAX;
-    uint32_t generation = 0;
+// =============================================================================
+// COMPONENT MASK
+// =============================================================================
+class ComponentMask {
+private:
+    std::bitset<MAX_COMPONENTS> bits;
 
-    [[nodiscard]] bool IsValid() const noexcept { return index != UINT32_MAX; }
-    [[nodiscard]] bool operator==(const EntityHandle& o) const noexcept {
-        return index == o.index && generation == o.generation;
+public:
+    void Set(ComponentTypeId id) { bits.set(id); }
+    void Clear(ComponentTypeId id) { bits.reset(id); }
+    [[nodiscard]] bool Test(ComponentTypeId id) const { return bits.test(id); }
+    [[nodiscard]] bool Contains(const ComponentMask& other) const {
+        return (bits & other.bits) == other.bits;
     }
-    [[nodiscard]] bool operator!=(const EntityHandle& o) const noexcept {
-        return !(*this == o);
+    [[nodiscard]] bool Matches(const ComponentMask& other) const {
+        return Contains(other);
     }
+    [[nodiscard]] bool operator==(const ComponentMask& other) const {
+        return bits == other.bits;
+    }
+    [[nodiscard]] bool operator!=(const ComponentMask& other) const {
+        return bits != other.bits;
+    }
+    [[nodiscard]] auto Hash() const { return std::hash<std::bitset<MAX_COMPONENTS>>{}(bits); }
 };
-
-inline constexpr EntityHandle INVALID_ENTITY{UINT32_MAX, 0};
-
-// Archetype signature: bitset of component types
-using ArchetypeSignature = std::bitset<MAX_COMPONENTS>;
-
-// Component offset within a chunk (in bytes)
-using ComponentOffset = size_t;
-
-// Component size (in bytes)
-using ComponentSize = size_t;
-
-// Component alignment requirement
-using ComponentAlign = size_t;
-
-// Component metadata for archetype construction
-struct ComponentMeta {
-    ComponentTypeId typeId;
-    ComponentSize size;
-    ComponentAlign alignment;
-    std::type_index typeIndex;
-};
-
-// Dense index into archetype's entity array (0..N, no gaps)
-using ArchetypeIndex = uint32_t;
-
-// Sparse index into global entity array (may have gaps/recycled slots)
-using SparseIndex = uint32_t;
 
 } // namespace ecs
+
+// =============================================================================
+// HASH FUER COMPONENTMASK (fuer unordered_map)
+// =============================================================================
+namespace std {
+    template<>
+    struct hash<ecs::ComponentMask> {
+        [[nodiscard]] size_t operator()(const ecs::ComponentMask& mask) const {
+            return mask.Hash();
+        }
+    };
+}

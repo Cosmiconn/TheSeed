@@ -1,187 +1,219 @@
 #pragma once
 // =============================================================================
-// ecs/Chunk.h — SOA Memory Storage for Homogeneous Entities
-// AP-20: Archetype Storage
+// ecs/ecs_Chunk.h — SOA-Speicher-Chunk (P4)
 // =============================================================================
-#include "Types.h"
-#include "ComponentTraits.h"
-#include <memory>
+// KORREKTUR P4: GetMemorySize() hinzugefuegt. Prefetching fuer Iterationen.
+// SIMD-freundliche Alignment (64 Bytes). Null-Initialisierung optimiert.
+// =============================================================================
+#include "ecs_Types.h"
+#include "ecs_ComponentTraits.h"
+#include "../core/Log.h"
+
+#include <cstdint>
+#include <cstddef>
 #include <cstring>
+#include <memory>
+#include <vector>
 #include <algorithm>
-#include <cassert>
+
+#ifdef _WIN32
+    #include <intrin.h>
+#else
+    #include <immintrin.h>
+#endif
 
 namespace ecs {
 
-// A Chunk stores entities of the same archetype in SOA layout
-// Memory layout: [entityHandles][component0_array][component1_array]...[componentN_array]
+// =============================================================================
+// CHUNK
+// =============================================================================
 class Chunk {
 public:
-    static constexpr size_t CAPACITY = 1024; // Entities per chunk
+    static constexpr size_t MAX_ENTITIES = 1024;
+    static constexpr size_t ALIGNMENT = 64; // Cache-line + AVX-512
 
 private:
-    struct ComponentLayout {
-        ComponentTypeId typeId;
-        ComponentOffset offset;  // From start of component data area
-        ComponentSize size;
-        ComponentAlign alignment;
-    };
-
-    std::unique_ptr<std::byte[]> memory;
+    ComponentMask componentMask;
+    std::unique_ptr<uint8_t[]> memory;
     size_t memorySize = 0;
+    size_t entityCount = 0;
+    size_t entityCapacity = 0;
 
-    std::vector<ComponentLayout> layouts;
-    size_t entitySize = 0;  // Total bytes per entity (all components)
-
-    uint32_t entityCount = 0;
-
-    // Offsets into memory block
-    size_t entityHandleOffset = 0;  // Where EntityHandle[] starts
-    size_t componentDataOffset = 0; // Where component arrays start
+    struct ComponentInfo {
+        ComponentTypeId typeId;
+        size_t offset;
+        size_t size;
+        size_t alignment;
+    };
+    std::vector<ComponentInfo> componentInfos;
+    EntityHandle* entityHandles = nullptr;
 
 public:
-    Chunk() = default;
+    explicit Chunk(const ComponentMask& mask) : componentMask(mask) {}
 
-    explicit Chunk(const std::vector<ComponentMeta>& componentMetas) {
-        Initialize(componentMetas);
-    }
+    // ===================================================================
+    // Initialisierung
+    // ===================================================================
+    template<typename... Components>
+    void Initialize() {
+        memorySize = 0;
+        componentInfos.clear();
 
-    void Initialize(const std::vector<ComponentMeta>& componentMetas) {
-        layouts.clear();
+        // Entity-Handles Array
+        size_t handlesSize = MAX_ENTITIES * sizeof(EntityHandle);
+        memorySize += handlesSize;
 
-        // Calculate offsets for each component array
-        // Layout: [EntityHandle[CAPACITY]] [align] [comp0[CAPACITY]] [align] [comp1[CAPACITY]] ...
-        entityHandleOffset = 0;
-        componentDataOffset = sizeof(EntityHandle) * CAPACITY;
-        // Align component data to 64 bytes for cache efficiency
-        componentDataOffset = (componentDataOffset + 63) & ~63;
+        size_t currentOffset = handlesSize;
 
-        size_t currentOffset = componentDataOffset;
+        auto addComponent = [&]<typename T>() {
+            if (!componentMask.Test(ComponentTraits<T>::GetId())) return;
 
-        for (const auto& meta : componentMetas) {
-            // Align to component's alignment requirement
-            size_t alignedOffset = (currentOffset + meta.alignment - 1) & ~(meta.alignment - 1);
+            size_t align = ComponentTraits<T>::Align();
+            size_t alignedOffset = (currentOffset + align - 1) & ~(align - 1);
 
-            layouts.push_back({
-                .typeId = meta.typeId,
-                .offset = alignedOffset,
-                .size = meta.size,
-                .alignment = meta.alignment
+            size_t componentSize = ComponentTraits<T>::Size() * MAX_ENTITIES;
+            if (alignedOffset + componentSize > 1024 * 1024) {
+                AddLog("[ECS] WARNUNG: Chunk wuerde 1MB ueberschreiten!");
+            }
+
+            componentInfos.push_back({
+                ComponentTraits<T>::GetId(),
+                alignedOffset,
+                ComponentTraits<T>::Size(),
+                align
             });
 
-            currentOffset = alignedOffset + meta.size * CAPACITY;
+            currentOffset = alignedOffset + componentSize;
+        };
+
+        (addComponent.template operator()<Components>(), ...);
+
+        memorySize = (currentOffset + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+
+        #ifdef _WIN32
+        memory.reset(static_cast<uint8_t*>(_aligned_malloc(memorySize, ALIGNMENT)));
+        #else
+        memory.reset(static_cast<uint8_t*>(aligned_alloc(ALIGNMENT, memorySize)));
+        #endif
+
+        if (!memory) {
+            AddLog("[ECS] FEHLER: Chunk-Speicherallokation fehlgeschlagen!");
+            return;
         }
 
-        memorySize = currentOffset;
-        memory = std::make_unique<std::byte[]>(memorySize);
-
-        // Zero-initialize
+        // Null-Initialisierung (SIMD-optimiert)
         std::memset(memory.get(), 0, memorySize);
+
+        entityHandles = reinterpret_cast<EntityHandle*>(memory.get());
+        entityCapacity = MAX_ENTITIES;
+
+        AddLog("[ECS] Chunk initialisiert: {} Bytes, {} Komponenten, Kapazitaet {}",
+               memorySize, componentInfos.size(), entityCapacity);
     }
 
-    [[nodiscard]] bool IsFull() const noexcept { return entityCount >= CAPACITY; }
-    [[nodiscard]] bool IsEmpty() const noexcept { return entityCount == 0; }
-    [[nodiscard]] uint32_t Count() const noexcept { return entityCount; }
-    [[nodiscard]] uint32_t Capacity() const noexcept { return CAPACITY; }
-
-    // Allocate a new entity slot, returns dense index
-    [[nodiscard]] ArchetypeIndex AllocateEntity(EntityHandle handle) {
-        assert(entityCount < CAPACITY && "Chunk is full");
-        ArchetypeIndex idx = entityCount++;
-        GetEntityHandle(idx) = handle;
-        return idx;
+    // ===================================================================
+    // Entity Management
+    // ===================================================================
+    [[nodiscard]] size_t AllocateEntity(EntityHandle entity) {
+        if (entityCount >= entityCapacity) {
+            AddLog("[ECS] Chunk voll! Entity {} kann nicht allokiert werden.", entity);
+            return SIZE_MAX;
+        }
+        entityHandles[entityCount] = entity;
+        return entityCount++;
     }
 
-    // Remove entity by swapping with last (O(1))
-    // Returns the handle that was swapped into this slot (or INVALID if no swap)
-    [[nodiscard]] EntityHandle RemoveEntity(ArchetypeIndex idx) {
-        assert(idx < entityCount && "Invalid entity index");
+    void RemoveEntity(size_t index) {
+        if (index >= entityCount) return;
 
-        EntityHandle movedHandle = INVALID_ENTITY;
+        if (index != entityCount - 1) {
+            EntityHandle lastEntity = entityHandles[entityCount - 1];
+            entityHandles[index] = lastEntity;
 
-        if (idx != entityCount - 1) {
-            // Swap with last entity
-            ArchetypeIndex lastIdx = entityCount - 1;
-            movedHandle = GetEntityHandle(lastIdx);
-
-            // Swap entity handle
-            GetEntityHandle(idx) = movedHandle;
-
-            // Swap all component data
-            for (const auto& layout : layouts) {
-                std::byte* dst = GetComponentPtr(idx, layout);
-                std::byte* src = GetComponentPtr(lastIdx, layout);
-                std::memcpy(dst, src, layout.size);
+            for (const auto& info : componentInfos) {
+                uint8_t* src = memory.get() + info.offset + (entityCount - 1) * info.size;
+                uint8_t* dst = memory.get() + info.offset + index * info.size;
+                std::memcpy(dst, src, info.size);
             }
         }
 
         entityCount--;
-        return movedHandle;
     }
 
-    // Get entity handle at dense index
-    [[nodiscard]] EntityHandle& GetEntityHandle(ArchetypeIndex idx) {
-        assert(idx < entityCount && "Invalid entity index");
-        auto* handles = reinterpret_cast<EntityHandle*>(memory.get() + entityHandleOffset);
-        return handles[idx];
+    [[nodiscard]] EntityHandle GetEntity(size_t index) const {
+        if (index >= entityCount) return INVALID_ENTITY;
+        return entityHandles[index];
     }
 
-    [[nodiscard]] const EntityHandle& GetEntityHandle(ArchetypeIndex idx) const {
-        assert(idx < entityCount && "Invalid entity index");
-        auto* handles = reinterpret_cast<const EntityHandle*>(memory.get() + entityHandleOffset);
-        return handles[idx];
-    }
+    [[nodiscard]] size_t GetEntityCount() const { return entityCount; }
+    [[nodiscard]] size_t GetCapacity() const { return entityCapacity; }
+    [[nodiscard]] bool IsFull() const { return entityCount >= entityCapacity; }
+    [[nodiscard]] size_t GetMemorySize() const { return memorySize; }
 
-    // Get component pointer for an entity (raw bytes)
-    [[nodiscard]] std::byte* GetComponentPtr(ArchetypeIndex idx, const ComponentLayout& layout) {
-        return memory.get() + layout.offset + (idx * layout.size);
-    }
-
-    [[nodiscard]] const std::byte* GetComponentPtr(ArchetypeIndex idx, const ComponentLayout& layout) const {
-        return memory.get() + layout.offset + (idx * layout.size);
-    }
-
-    // Type-safe component access
+    // ===================================================================
+    // Component Access
+    // ===================================================================
     template<typename T>
-    [[nodiscard]] T* GetComponent(ArchetypeIndex idx, ComponentTypeId typeId) {
-        auto it = std::ranges::find_if(layouts, 
-            [typeId](const auto& l){ return l.typeId == typeId; });
-        if (it == layouts.end()) return nullptr;
-        return reinterpret_cast<T*>(GetComponentPtr(idx, *it));
+    [[nodiscard]] T* GetComponent(size_t index) {
+        ComponentTypeId id = ComponentTraits<T>::GetId();
+        for (const auto& info : componentInfos) {
+            if (info.typeId == id) {
+                return reinterpret_cast<T*>(memory.get() + info.offset + index * info.size);
+            }
+        }
+        return nullptr;
     }
 
     template<typename T>
-    [[nodiscard]] const T* GetComponent(ArchetypeIndex idx, ComponentTypeId typeId) const {
-        auto it = std::ranges::find_if(layouts,
-            [typeId](const auto& l){ return l.typeId == typeId; });
-        if (it == layouts.end()) return nullptr;
-        return reinterpret_cast<const T*>(GetComponentPtr(idx, *it));
+    void SetComponent(size_t index, const T& value) {
+        T* ptr = GetComponent<T>(index);
+        if (ptr) *ptr = value;
     }
 
-    // Move entity from another chunk (used during archetype transitions)
-    void MoveEntityFrom(ArchetypeIndex dstIdx, const Chunk& srcChunk, ArchetypeIndex srcIdx,
-                        const std::vector<ComponentTypeId>& sharedComponents) {
-        GetEntityHandle(dstIdx) = srcChunk.GetEntityHandle(srcIdx);
+    // ===================================================================
+    // Prefetching (P4: Performance)
+    // ===================================================================
+    void PrefetchComponents(size_t index) const {
+        if (index >= entityCount) return;
+        for (const auto& info : componentInfos) {
+            const void* addr = memory.get() + info.offset + index * info.size;
+            #ifdef _WIN32
+            _mm_prefetch(static_cast<const char*>(addr), _MM_HINT_T0);
+            #else
+            __builtin_prefetch(addr, 1, 3);
+            #endif
+        }
+    }
 
-        for (ComponentTypeId typeId : sharedComponents) {
-            auto dstLayout = std::ranges::find_if(layouts,
-                [typeId](const auto& l){ return l.typeId == typeId; });
-            auto srcLayout = std::ranges::find_if(srcChunk.layouts,
-                [typeId](const auto& l){ return l.typeId == typeId; });
-
-            if (dstLayout != layouts.end() && srcLayout != srcChunk.layouts.end()) {
-                std::byte* dst = GetComponentPtr(dstIdx, *dstLayout);
-                const std::byte* src = srcChunk.GetComponentPtr(srcIdx, *srcLayout);
-                std::memcpy(dst, src, dstLayout->size);
+    // ===================================================================
+    // Transfer
+    // ===================================================================
+    void TransferComponents(const Chunk& source, size_t sourceIndex, size_t destIndex) {
+        for (const auto& info : componentInfos) {
+            const uint8_t* src = source.GetRawComponentPtr(info.typeId, sourceIndex);
+            if (src) {
+                uint8_t* dst = memory.get() + info.offset + destIndex * info.size;
+                std::memcpy(dst, src, info.size);
             }
         }
     }
 
-    // Iterate over all entities in chunk (for system processing)
-    template<typename Func>
-    void ForEachEntity(Func&& func) {
-        for (uint32_t i = 0; i < entityCount; ++i) {
-            func(GetEntityHandle(i), i);
+    // ===================================================================
+    // Queries
+    // ===================================================================
+    [[nodiscard]] const ComponentMask& GetComponentMask() const { return componentMask; }
+    [[nodiscard]] bool Matches(const ComponentMask& queryMask) const {
+        return componentMask.Contains(queryMask);
+    }
+
+private:
+    [[nodiscard]] const uint8_t* GetRawComponentPtr(ComponentTypeId id, size_t index) const {
+        for (const auto& info : componentInfos) {
+            if (info.typeId == id) {
+                return memory.get() + info.offset + index * info.size;
+            }
         }
+        return nullptr;
     }
 };
 

@@ -1,130 +1,107 @@
 #pragma once
 // =============================================================================
-// ecs/Query.h — Type-safe Query System for Archetype Matching
-// AP-20: Archetype Storage
+// ecs/ecs_Query.h — Typ-sicheres Query-System (AP-20)
 // =============================================================================
-#include "Types.h"
-#include "ComponentTraits.h"
-#include "Archetype.h"
+// KORREKTUR: Iterator-basiertes Query-System für Range-based for loops.
+// Korrekte Komponenten-Pointer-Berechnung.
+// =============================================================================
+#include "ecs_Types.h"
+#include "ecs_Chunk.h"
+#include "ecs_ComponentTraits.h"
+
 #include <vector>
-#include <type_traits>
 #include <tuple>
+#include <cstddef>
 
 namespace ecs {
 
-// Query filter: which components an archetype must have
-class QueryFilter {
-    ArchetypeSignature required;
-    ArchetypeSignature excluded;
-
-public:
-    QueryFilter() = default;
-
-    template<typename... Components>
-    [[nodiscard]] static QueryFilter With() {
-        QueryFilter filter;
-        (filter.required.set(ComponentId<Components>()), ...);
-        return filter;
-    }
-
-    template<typename... Components>
-    [[nodiscard]] static QueryFilter Without() {
-        QueryFilter filter;
-        (filter.excluded.set(ComponentId<Components>()), ...);
-        return filter;
-    }
-
-    template<typename... Components>
-    QueryFilter& With() {
-        (required.set(ComponentId<Components>()), ...);
-        return *this;
-    }
-
-    template<typename... Components>
-    QueryFilter& Without() {
-        (excluded.set(ComponentId<Components>()), ...);
-        return *this;
-    }
-
-    [[nodiscard]] bool Matches(const ArchetypeSignature& archetype) const noexcept {
-        return (archetype & required) == required && (archetype & excluded).none();
-    }
-
-    [[nodiscard]] const ArchetypeSignature& GetRequired() const noexcept { return required; }
-    [[nodiscard]] const ArchetypeSignature& GetExcluded() const noexcept { return excluded; }
-};
-
-// Query result iterator
-class QueryResult {
-    std::vector<Archetype*> matchingArchetypes;
-
-public:
-    explicit QueryResult(std::vector<Archetype*> archetypes) 
-        : matchingArchetypes(std::move(archetypes)) {}
-
-    [[nodiscard]] bool IsEmpty() const noexcept { return matchingArchetypes.empty(); }
-    [[nodiscard]] size_t GetArchetypeCount() const noexcept { return matchingArchetypes.size(); }
-
-    // Iterate over all matching archetypes
-    template<typename Func>
-    void ForEachArchetype(Func&& func) {
-        for (auto* archetype : matchingArchetypes) {
-            func(*archetype);
-        }
-    }
-
-    // Iterate over all entities in all matching archetypes
-    // Func signature: void(Chunk* chunk, ArchetypeIndex idx)
-    template<typename Func>
-    void ForEachEntity(Func&& func) {
-        for (auto* archetype : matchingArchetypes) {
-            archetype->ForEach(func);
-        }
-    }
-
-    // Get component arrays for batch processing (SIMD-friendly)
-    // Returns all chunks from matching archetypes
-    [[nodiscard]] std::vector<Chunk*> GetChunks() const {
-        std::vector<Chunk*> result;
-        for (auto* archetype : matchingArchetypes) {
-            for (auto& chunk : archetype->GetChunks()) {
-                result.push_back(chunk.get());
-            }
-        }
-        return result;
-    }
-};
-
-// Typed query for specific component combinations
-// Usage: auto query = world.Query<TransformComponent, HealthComponent>();
+// =============================================================================
+// QUERY ITERATOR
+// =============================================================================
 template<typename... Components>
-class TypedQuery {
-    static_assert(sizeof...(Components) > 0, "Query must have at least one component");
-
-    QueryResult result;
+class QueryIterator {
+private:
+    std::vector<Chunk*> chunks;
+    size_t chunkIndex = 0;
+    size_t entityIndex = 0;
 
 public:
-    explicit TypedQuery(QueryResult r) : result(std::move(r)) {}
+    QueryIterator(std::vector<Chunk*> chunkList, size_t cIdx, size_t eIdx)
+        : chunks(std::move(chunkList)), chunkIndex(cIdx), entityIndex(eIdx) {}
 
-    // Iterate with typed component pointers
-    // Func signature: void(EntityHandle, Components*...)
-    template<typename Func>
-    void ForEach(Func&& func) {
-        static constexpr std::array<ComponentTypeId, sizeof...(Components)> componentIds = {
-            ComponentId<Components>()...
-        };
+    // ===================================================================
+    // Iterator-Interface
+    // ===================================================================
+    using value_type = std::tuple<EntityHandle, Components&...>;
 
-        result.ForEachEntity([&](Chunk* chunk, ArchetypeIndex idx) {
-            EntityHandle handle = chunk->GetEntityHandle(idx);
-            // Get all component pointers
-            auto pointers = std::make_tuple(chunk->GetComponent<Components>(idx, ComponentId<Components>())...);
-            std::apply([&](auto*... ptrs) {
-                func(handle, ptrs...);
-            }, pointers);
-        });
+    QueryIterator& operator++() {
+        entityIndex++;
+        if (chunks.empty()) return *this;
+
+        while (chunkIndex < chunks.size() &&
+               entityIndex >= chunks[chunkIndex]->GetEntityCount()) {
+            chunkIndex++;
+            entityIndex = 0;
+        }
+        return *this;
     }
 
-    [[nodiscard]] bool IsEmpty() const noexcept { return result.IsEmpty(); }
+    [[nodiscard]] bool operator!=(const QueryIterator& other) const {
+        return chunkIndex != other.chunkIndex || entityIndex != other.entityIndex;
+    }
+
+    [[nodiscard]] value_type operator*() {
+        Chunk* chunk = chunks[chunkIndex];
+        EntityHandle entity = chunk->GetEntity(entityIndex);
+        return std::tuple_cat(
+            std::make_tuple(entity),
+            std::make_tuple(std::ref(*chunk->GetComponent<Components>(entityIndex))...)
+        );
+    }
+};
+
+// =============================================================================
+// QUERY
+// =============================================================================
+template<typename... Components>
+class Query {
+private:
+    std::vector<Chunk*> chunks;
+
+public:
+    explicit Query(std::vector<Chunk*> chunkList) : chunks(std::move(chunkList)) {}
+
+    [[nodiscard]] QueryIterator<Components...> begin() {
+        size_t startChunk = 0;
+        size_t startEntity = 0;
+
+        // Überspringe leere Chunks
+        while (startChunk < chunks.size() &&
+               chunks[startChunk]->GetEntityCount() == 0) {
+            startChunk++;
+        }
+
+        return QueryIterator<Components...>(chunks, startChunk, startEntity);
+    }
+
+    [[nodiscard]] QueryIterator<Components...> end() {
+        return QueryIterator<Components...>(chunks, chunks.size(), 0);
+    }
+
+    [[nodiscard]] bool IsEmpty() const {
+        for (auto* chunk : chunks) {
+            if (chunk->GetEntityCount() > 0) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] size_t Count() const {
+        size_t count = 0;
+        for (auto* chunk : chunks) {
+            count += chunk->GetEntityCount();
+        }
+        return count;
+    }
 };
 
 } // namespace ecs

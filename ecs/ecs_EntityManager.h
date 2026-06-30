@@ -1,120 +1,119 @@
 #pragma once
 // =============================================================================
-// ecs/EntityManager.h — Entity Handle Lifecycle Management
-// AP-20: Archetype Storage
+// ecs/ecs_EntityManager.h — Entity Lifecycle Management (AP-20)
 // =============================================================================
-#include "Types.h"
+// KORREKTUR: Thread-sichere Entity-Erzeugung. Freie Entities werden aus
+// einem Pool wiederverwendet. Records werden korrekt aktualisiert.
+// =============================================================================
+#include "ecs_Types.h"
+#include "ecs_Chunk.h"
+#include "../core/Log.h"
+
 #include <vector>
 #include <queue>
+#include <unordered_map>
 #include <mutex>
 
 namespace ecs {
 
-// Stores sparse array mapping: EntityHandle.index -> (generation, archetype, denseIndex)
+// =============================================================================
+// ENTITY RECORD — Verknüpfung Entity → Chunk + Index
+// =============================================================================
 struct EntityRecord {
+    Chunk* chunk = nullptr;
+    size_t denseIndex = SIZE_MAX;
     uint32_t generation = 0;
     bool isAlive = false;
-    class Archetype* archetype = nullptr;  // Current archetype
-    Chunk* chunk = nullptr;                // Current chunk
-    ArchetypeIndex denseIndex = 0;         // Index within chunk
 };
 
+// =============================================================================
+// ENTITY MANAGER
+// =============================================================================
 class EntityManager {
-    std::vector<EntityRecord> sparseArray;
-    std::queue<uint32_t> freeIndices;
+private:
+    std::vector<EntityRecord> records;
+    std::queue<EntityHandle> freeEntities;
     std::mutex mutex;
-    uint32_t nextIndex = 0;
+    EntityHandle nextEntityId = 1;
 
 public:
     EntityManager() = default;
+    ~EntityManager() = default;
 
-    // Create a new entity handle
+    EntityManager(const EntityManager&) = delete;
+    EntityManager& operator=(const EntityManager&) = delete;
+
+    // ===================================================================
+    // Entity Lifecycle
+    // ===================================================================
     [[nodiscard]] EntityHandle CreateEntity() {
         std::lock_guard lock(mutex);
 
-        uint32_t index;
-        uint32_t generation = 1;
-
-        if (!freeIndices.empty()) {
-            index = freeIndices.front();
-            freeIndices.pop();
-            generation = sparseArray[index].generation + 1;
+        EntityHandle entity;
+        if (!freeEntities.empty()) {
+            entity = freeEntities.front();
+            freeEntities.pop();
+            records[entity].generation++;
+            records[entity].isAlive = true;
+            records[entity].chunk = nullptr;
+            records[entity].denseIndex = SIZE_MAX;
         } else {
-            index = nextIndex++;
-            if (index >= sparseArray.size()) {
-                sparseArray.resize(index + 1);
-            }
+            entity = nextEntityId++;
+            records.resize(entity + 1);
+            records[entity] = EntityRecord{
+                .chunk = nullptr,
+                .denseIndex = SIZE_MAX,
+                .generation = 1,
+                .isAlive = true
+            };
         }
 
-        sparseArray[index] = {
-            .generation = generation,
-            .isAlive = true,
-            .archetype = nullptr,
-            .chunk = nullptr,
-            .denseIndex = 0
-        };
-
-        return EntityHandle{index, generation};
+        return entity;
     }
 
-    // Destroy entity and recycle handle
-    void DestroyEntity(EntityHandle handle) {
+    void DestroyEntity(EntityHandle entity) {
         std::lock_guard lock(mutex);
+        if (entity >= records.size() || !records[entity].isAlive) return;
 
-        if (!IsAlive(handle)) return;
-
-        sparseArray[handle.index].isAlive = false;
-        sparseArray[handle.index].archetype = nullptr;
-        sparseArray[handle.index].chunk = nullptr;
-        freeIndices.push(handle.index);
+        records[entity].isAlive = false;
+        records[entity].chunk = nullptr;
+        records[entity].denseIndex = SIZE_MAX;
+        freeEntities.push(entity);
     }
 
-    // Check if entity is alive
-    [[nodiscard]] bool IsAlive(EntityHandle handle) const {
-        if (handle.index >= sparseArray.size()) return false;
-        const auto& record = sparseArray[handle.index];
-        return record.isAlive && record.generation == handle.generation;
+    [[nodiscard]] bool IsAlive(EntityHandle entity) const {
+        if (entity >= records.size()) return false;
+        return records[entity].isAlive;
     }
 
-    // Get entity record (for archetype transitions)
-    [[nodiscard]] EntityRecord* GetRecord(EntityHandle handle) {
-        if (handle.index >= sparseArray.size()) return nullptr;
-        auto& record = sparseArray[handle.index];
-        if (record.generation != handle.generation) return nullptr;
-        return &record;
-    }
-
-    [[nodiscard]] const EntityRecord* GetRecord(EntityHandle handle) const {
-        if (handle.index >= sparseArray.size()) return nullptr;
-        const auto& record = sparseArray[handle.index];
-        if (record.generation != handle.generation) return nullptr;
-        return &record;
-    }
-
-    // Update entity location after archetype transition
-    void UpdateEntityLocation(EntityHandle handle, Archetype* archetype, Chunk* chunk, ArchetypeIndex denseIndex) {
+    // ===================================================================
+    // Record Management
+    // ===================================================================
+    void UpdateRecord(EntityHandle entity, Chunk* chunk, size_t denseIndex) {
         std::lock_guard lock(mutex);
-        if (handle.index >= sparseArray.size()) return;
-        auto& record = sparseArray[handle.index];
-        if (record.generation != handle.generation) return;
-
-        record.archetype = archetype;
-        record.chunk = chunk;
-        record.denseIndex = denseIndex;
+        if (entity >= records.size()) return;
+        records[entity].chunk = chunk;
+        records[entity].denseIndex = denseIndex;
     }
 
-    // Get current entity count
-    [[nodiscard]] uint32_t GetAliveCount() const {
-        uint32_t count = 0;
-        for (const auto& record : sparseArray) {
-            if (record.isAlive) count++;
+    [[nodiscard]] EntityRecord GetRecord(EntityHandle entity) const {
+        if (entity >= records.size()) return EntityRecord{};
+        return records[entity];
+    }
+
+    void Clear() {
+        std::lock_guard lock(mutex);
+        records.clear();
+        while (!freeEntities.empty()) freeEntities.pop();
+        nextEntityId = 1;
+    }
+
+    [[nodiscard]] size_t GetAliveCount() const {
+        size_t count = 0;
+        for (const auto& r : records) {
+            if (r.isAlive) count++;
         }
         return count;
-    }
-
-    // Get total allocated slots (including dead)
-    [[nodiscard]] uint32_t GetCapacity() const {
-        return static_cast<uint32_t>(sparseArray.size());
     }
 };
 
