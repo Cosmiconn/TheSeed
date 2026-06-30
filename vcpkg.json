@@ -1,17 +1,21 @@
 {
-  "name": "the-seed-engine",
-  "version": "13.1",
-  "description": "C++23 MMORPG Engine V13.1",
+  "name": "theseed-engine",
+  "version": "13.2.0",
   "dependencies": [
     "glfw3",
-    "sqlite3",
     "imgui",
-    "glm",
-    "vulkan",
-    "vk-bootstrap",
-    "enet",
-    "libsodium"
+    "glew",
+    "sqlite3",
+    "magic-enum"
   ],
-  "overrides": [],
-  "builtin-baseline": "2024.06.15"
+  "features": {
+    "vulkan": {
+      "description": "Vulkan renderer support",
+      "dependencies": ["vulkan"]
+    },
+    "editor": {
+      "description": "In-engine editor",
+      "dependencies": ["imgui"]
+    }
+  }
 }
