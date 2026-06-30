@@ -1,138 +1,174 @@
+// =============================================================================
+// server/network/Snapshot.h — Delta-Kompression + Interest Management (AP-37/AP-40)
+// =============================================================================
+// KORREKTUR: Delta-Kompression + Spatial Hash Interest Management zusammengeführt.
+// Nur Entities innerhalb des AOI (Area of Interest) werden serialisiert.
+// Delta-Kompression sendet nur geänderte Felder seit dem letzten Snapshot.
+// =============================================================================
 #pragma once
-// =============================================================================
-// server/network/Snapshot.h — World Snapshot Builder (AP-37)
-// Serializes ECS world state for network replication
-// =============================================================================
 #include "../../ecs/ecs_EcsWorld.h"
 #include "../../ecs/Components.h"
-#include "../../network/network_ReliableUdp.h"
-#include <cstdint>
+#include "../../core/ByteBuffer.h"
+#include "../../math/Vector.h"
+
 #include <vector>
 #include <span>
-#include <memory>
 #include <unordered_map>
+#include <unordered_set>
+#include <memory>
+#include <chrono>
+#include <cstdint>
 
 namespace net {
 
 // =============================================================================
-// Snapshot Data Structures
+// Delta Entity State — Was sich seit dem letzten Snapshot geändert hat
+// =============================================================================
+enum class DeltaFlags : uint8_t {
+    None        = 0x00,
+    Position    = 0x01,  // x, y, z
+    Rotation    = 0x02,  // rotationY
+    Health      = 0x04,  // currentHP, maxHP
+    Name        = 0x08,  // name string
+    Material    = 0x10,  // materialId
+    Velocity    = 0x20,  // vx, vz
+    All         = 0x3F
+};
+
+inline DeltaFlags operator|(DeltaFlags a, DeltaFlags b) {
+    return static_cast<DeltaFlags>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+inline DeltaFlags operator&(DeltaFlags a, DeltaFlags b) {
+    return static_cast<DeltaFlags>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+}
+inline bool HasFlag(DeltaFlags flags, DeltaFlags check) {
+    return (static_cast<uint8_t>(flags) & static_cast<uint8_t>(check)) != 0;
+}
+
+// =============================================================================
+// Entity State (für Delta-Vergleich)
 // =============================================================================
 struct EntityState {
-    uint32_t entityId = 0;
-    uint32_t archetypeHash = 0;
+    uint32_t id = 0;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float rotationY = 0.0f;
+    uint32_t currentHP = 0, maxHP = 0;
+    std::string name;
+    std::string materialId;
+    float vx = 0.0f, vz = 0.0f;
 
-    // Transform (most common, always included if entity has it)
-    float posX = 0.0f, posY = 0.0f, posZ = 0.0f;
-    float rotY = 0.0f;
-
-    // Health (if changed)
-    int32_t currentHP = -1;  // -1 = not present
-    int32_t maxHP = -1;
-
-    // Animation state
-    uint8_t animState = 0;   // 0=idle, 1=walk, 2=attack, 3=death
-    float animTime = 0.0f;
-
-    // Status effects (bitmask)
-    uint32_t statusMask = 0;
-
-    // Dirty flags: which fields are actually present
-    uint16_t fieldMask = 0;
-
-    static constexpr uint16_t FIELD_POS = 0x0001;
-    static constexpr uint16_t FIELD_ROT = 0x0002;
-    static constexpr uint16_t FIELD_HP = 0x0004;
-    static constexpr uint16_t FIELD_ANIM = 0x0008;
-    static constexpr uint16_t FIELD_STATUS = 0x0010;
-};
-
-struct Snapshot {
-    uint32_t sequence = 0;
-    float serverTime = 0.0f;
-    std::vector<EntityState> entities;
-    std::vector<uint32_t> destroyedEntities;
-
-    // Delta compression: which entities changed since base snapshot
-    uint32_t baseSequence = 0;
-    bool isFullSnapshot = false;
+    [[nodiscard]] bool operator==(const EntityState& other) const noexcept = default;
+    [[nodiscard]] bool operator!=(const EntityState& other) const noexcept = default;
 };
 
 // =============================================================================
-// Snapshot Builder
+// Spatial Hash — Schnelle räumliche Abfragen für Interest Management
 // =============================================================================
-class SnapshotBuilder {
-    std::unordered_map<uint32_t, EntityState> lastEntityStates;
-    uint32_t nextSequence = 1;
+class SpatialHash {
+    static constexpr float CELL_SIZE = 50.0f;  // 50m Zellen
 
-    // Config
-    float snapshotRate = 20.0f;  // 20Hz default
-    float maxEntityDistance = 200.0f;  // Cull entities beyond this
-    size_t maxEntitiesPerSnapshot = 1000;
-
-public:
-    explicit SnapshotBuilder(float rate = 20.0f);
-
-    // Build full snapshot of entire ECS world
-    [[nodiscard]] Snapshot BuildFull(const ecs::EcsWorld& world);
-
-    // Build delta snapshot (only changed entities since last ack)
-    [[nodiscard]] Snapshot BuildDelta(const ecs::EcsWorld& world, uint32_t ackedSequence);
-
-    // Serialize snapshot to binary (for network transmission)
-    [[nodiscard]] std::vector<uint8_t> Serialize(const Snapshot& snapshot) const;
-
-    // Deserialize from binary
-    [[nodiscard]] std::optional<Snapshot> Deserialize(std::span<const uint8_t> data) const;
-
-    // Get current sequence number
-    [[nodiscard]] uint32_t GetCurrentSequence() const { return nextSequence; }
-
-    // Set max entities per snapshot (for bandwidth limiting)
-    void SetMaxEntities(size_t max) { maxEntitiesPerSnapshot = max; }
-
-private:
-    [[nodiscard]] EntityState ExtractEntityState(ecs::EntityHandle handle, const ecs::EcsWorld& world);
-    [[nodiscard]] bool HasEntityChanged(uint32_t entityId, const EntityState& current) const;
-    void UpdateLastState(uint32_t entityId, const EntityState& state);
-    void CleanupOldStates(uint32_t minSequence);
-
-    // Write helpers for serialization
-    void WriteUInt32(std::vector<uint8_t>& buf, uint32_t val) const;
-    void WriteFloat(std::vector<uint8_t>& buf, float val) const;
-    void WriteUInt16(std::vector<uint8_t>& buf, uint16_t val) const;
-    void WriteUInt8(std::vector<uint8_t>& buf, uint8_t val) const;
-
-    [[nodiscard]] uint32_t ReadUInt32(std::span<const uint8_t>& buf) const;
-    [[nodiscard]] float ReadFloat(std::span<const uint8_t>& buf) const;
-    [[nodiscard]] uint16_t ReadUInt16(std::span<const uint8_t>& buf) const;
-    [[nodiscard]] uint8_t ReadUInt8(std::span<const uint8_t>& buf) const;
-};
-
-// =============================================================================
-// Interest Management (AP-40)
-// =============================================================================
-class InterestManager {
-    struct ClientView {
-        float x = 0.0f, z = 0.0f;
-        float radius = 100.0f;
-        uint32_t priority = 0;
+    struct CellKey {
+        int32_t x = 0, z = 0;
+        [[nodiscard]] bool operator==(const CellKey& o) const noexcept = default;
     };
 
-    std::unordered_map<uint32_t, ClientView> clientViews;
+    struct CellKeyHash {
+        [[nodiscard]] size_t operator()(const CellKey& k) const noexcept {
+            return std::hash<int64_t>{}((static_cast<int64_t>(k.x) << 32) ^ static_cast<uint32_t>(k.z));
+        }
+    };
+
+    std::unordered_map<CellKey, std::vector<uint32_t>, CellKeyHash> cells;
 
 public:
-    void UpdateClientView(uint32_t clientId, float x, float z, float radius);
-    void RemoveClient(uint32_t clientId);
+    void Clear();
+    void Insert(uint32_t entityId, float x, float z);
+    [[nodiscard]] std::vector<uint32_t> Query(float x, float z, float radius) const;
+    [[nodiscard]] static CellKey GetCell(float x, float z);
+};
 
-    // Filter entities: only return those relevant to client
-    [[nodiscard]] std::vector<uint32_t> FilterEntities(
-        uint32_t clientId,
-        std::span<const EntityState> allEntities) const;
+// =============================================================================
+// Snapshot Builder — Delta-Kompression + Interest Management
+// =============================================================================
+class SnapshotBuilder {
+    // Client-Zustände (für Delta-Kompression pro Client)
+    struct ClientState {
+        std::unordered_map<uint32_t, EntityState> lastKnownState;
+        std::chrono::steady_clock::time_point lastSnapshotTime;
+        float viewX = 0.0f, viewZ = 0.0f;
+        float interestRadius = 100.0f;  // Default AOI: 100m
+    };
 
-    // LOD-based priority: closer entities = higher priority
-    [[nodiscard]] uint32_t CalculatePriority(
+    std::unordered_map<uint32_t, ClientState> clientStates;
+    std::mutex clientStatesMutex;
+
+    // Spatial Hash für Interest Management
+    SpatialHash spatialHash;
+    std::mutex spatialMutex;
+
+    // Konfiguration
+    float defaultInterestRadius = 100.0f;
+    float maxInterestRadius = 500.0f;
+
+public:
+    SnapshotBuilder() = default;
+    ~SnapshotBuilder() = default;
+
+    SnapshotBuilder(const SnapshotBuilder&) = delete;
+    SnapshotBuilder& operator=(const SnapshotBuilder&) = delete;
+
+    // ===================================================================
+    // Spatial Hash Update (wird pro Tick aufgerufen)
+    // ===================================================================
+    void UpdateSpatialHash(ecs::EcsWorld& world);
+
+    // ===================================================================
+    // Snapshot bauen für einen bestimmten Client
+    // ===================================================================
+    [[nodiscard]] ByteBuffer BuildSnapshot(
+        ecs::EcsWorld& world,
+        uint32_t clientSessionId,
         float clientX, float clientZ,
-        float entityX, float entityZ) const;
+        float interestRadius);
+
+    // ===================================================================
+    // Full Snapshot (für neue Clients oder Recovery)
+    // ===================================================================
+    [[nodiscard]] ByteBuffer BuildFullSnapshot(
+        ecs::EcsWorld& world,
+        uint32_t clientSessionId,
+        float clientX, float clientZ,
+        float interestRadius);
+
+    // ===================================================================
+    // Client Management
+    // ===================================================================
+    void RegisterClient(uint32_t sessionId);
+    void UnregisterClient(uint32_t sessionId);
+    void UpdateClientPosition(uint32_t sessionId, float x, float z);
+    void SetClientInterestRadius(uint32_t sessionId, float radius);
+
+    // ===================================================================
+    // Stats
+    // ===================================================================
+    [[nodiscard]] size_t GetClientCount() const;
+    void ResetClientState(uint32_t sessionId);
+
+private:
+    [[nodiscard]] DeltaFlags CalculateDelta(
+        const EntityState& oldState,
+        const EntityState& newState);
+
+    void SerializeEntityDelta(
+        ByteBuffer& buffer,
+        const EntityState& state,
+        DeltaFlags delta);
+
+    void SerializeEntityFull(ByteBuffer& buffer, const EntityState& state);
+
+    [[nodiscard]] EntityState ExtractEntityState(
+        ecs::EcsWorld& world,
+        ecs::EntityHandle handle);
 };
 
 } // namespace net
