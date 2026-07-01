@@ -1,298 +1,176 @@
 // =============================================================================
-// client/Interpolation.cpp — Client-Side Interpolation Implementation (AP-38)
+// client/Interpolation.cpp — Entity Interpolation + Dead Reckoning (AP-38) C++23
 // =============================================================================
+
 #include "Interpolation.h"
 #include "../core/Log.h"
-#include <cmath>
+
 #include <algorithm>
 
 namespace client {
 
 // =============================================================================
-// SnapshotBuffer
+// ENTITY INTERPOLATOR
 // =============================================================================
-void SnapshotBuffer::AddSnapshot(const net::Snapshot& snapshot, float receiveTime) {
-    auto& slot = snapshots[writeIndex % MAX_SNAPSHOTS];
-    slot.snapshot = snapshot;
-    slot.localReceiveTime = receiveTime;
-    slot.processed = false;
 
-    writeIndex++;
-    if (snapshotCount < MAX_SNAPSHOTS) snapshotCount++;
+void EntityInterpolator::AddSnapshot(const InterpSnapshot& snap) {
+    // Entferne alte Snapshots (älter als 2 Sekunden)
+    auto cutoff = snap.timestamp - std::chrono::seconds(2);
+    std::erase_if(snapshots, [&cutoff](const auto& s) {
+        return s.timestamp < cutoff;
+    });
+
+    // Füge neuen Snapshot ein (chronologisch sortiert)
+    auto it = std::ranges::upper_bound(snapshots, snap.timestamp, {},
+        &InterpSnapshot::timestamp);
+    snapshots.insert(it, snap);
+
+    lastSnapshot = snap;
+    lastReceiveTime = std::chrono::steady_clock::now();
+    hasData = true;
+
+    // Dead Reckoning: Aktualisiere Vorhersage mit Server-Daten
+    predictedPosition = math::Vector3(snap.x, snap.y, snap.z);
+    predictedVelocity = math::Vector3(snap.vx, snap.vy, snap.vz);
+    useDeadReckoning = true;
 }
 
-std::optional<net::EntityState> SnapshotBuffer::Interpolate(
-    uint32_t entityId, float renderTime) const {
+InterpSnapshot EntityInterpolator::Interpolate(std::chrono::steady_clock::time_point now) {
+    if (!hasData) return InterpSnapshot{};
+    if (snapshots.size() < 2) return lastSnapshot;
 
-    auto surrounding = FindSurroundingStates(entityId, renderTime);
-    if (!surrounding) return std::nullopt;
+    auto renderTime = now - INTERP_DELAY;
 
-    const auto& [from, to] = *surrounding;
+    // Finde zwei Snapshots um renderTime herum
+    auto it = std::ranges::lower_bound(snapshots, renderTime, {},
+        &InterpSnapshot::timestamp);
 
-    // Calculate interpolation factor
-    float t = 0.0f;
-    if (to.serverTime > from.serverTime) {
-        t = (renderTime - from.serverTime) / (to.serverTime - from.serverTime);
+    if (it == snapshots.begin()) {
+        // Zu früh → ersten Snapshot verwenden
+        return snapshots.front();
     }
+    if (it == snapshots.end()) {
+        // Zu spät → Extrapolation
+        auto& newest = snapshots.back();
+        auto timeSinceNewest = std::chrono::duration<float>(now - newest.timestamp).count();
+
+        if (timeSinceNewest * 1000.0f > MAX_EXTRAPOLATION.count()) {
+            // Zu lange keine Daten → einfrieren
+            return newest;
+        }
+
+        // Lineare Extrapolation
+        InterpSnapshot result = newest;
+        result.x += newest.vx * timeSinceNewest;
+        result.y += newest.vy * timeSinceNewest;
+        result.z += newest.vz * timeSinceNewest;
+        return result;
+    }
+
+    // Interpolation zwischen zwei Snapshots
+    auto& newer = *it;
+    auto& older = *(it - 1);
+
+    auto newerTime = std::chrono::duration<float>(newer.timestamp.time_since_epoch()).count();
+    auto olderTime = std::chrono::duration<float>(older.timestamp.time_since_epoch()).count();
+    auto renderTimeSec = std::chrono::duration<float>(renderTime.time_since_epoch()).count();
+
+    float t = (renderTimeSec - olderTime) / (newerTime - olderTime);
     t = std::clamp(t, 0.0f, 1.0f);
 
-    // Interpolate position
-    net::EntityState result;
-    result.entityId = entityId;
-    result.fieldMask = from.fieldMask | to.fieldMask;
-
-    if ((from.fieldMask & net::EntityState::FIELD_POS) && 
-        (to.fieldMask & net::EntityState::FIELD_POS)) {
-        result.posX = from.posX + (to.posX - from.posX) * t;
-        result.posY = from.posY + (to.posY - from.posY) * t;
-        result.posZ = from.posZ + (to.posZ - from.posZ) * t;
-    } else if (to.fieldMask & net::EntityState::FIELD_POS) {
-        result.posX = to.posX;
-        result.posY = to.posY;
-        result.posZ = to.posZ;
-    }
-
-    // Interpolate rotation (shortest path)
-    if ((from.fieldMask & net::EntityState::FIELD_ROT) && 
-        (to.fieldMask & net::EntityState::FIELD_ROT)) {
-        float diff = to.rotY - from.rotY;
-        if (diff > 3.14159f) diff -= 2.0f * 3.14159f;
-        if (diff < -3.14159f) diff += 2.0f * 3.14159f;
-        result.rotY = from.rotY + diff * t;
-    } else if (to.fieldMask & net::EntityState::FIELD_ROT) {
-        result.rotY = to.rotY;
-    }
-
-    // Use latest HP (no interpolation for discrete values)
-    if (to.fieldMask & net::EntityState::FIELD_HP) {
-        result.currentHP = to.currentHP;
-        result.maxHP = to.maxHP;
-    }
-
-    // Use latest animation state
-    if (to.fieldMask & net::EntityState::FIELD_ANIM) {
-        result.animState = to.animState;
-        result.animTime = to.animTime;
-    }
-
-    // Use latest status
-    if (to.fieldMask & net::EntityState::FIELD_STATUS) {
-        result.statusMask = to.statusMask;
-    }
+    InterpSnapshot result;
+    result.x = older.x + (newer.x - older.x) * t;
+    result.y = older.y + (newer.y - older.y) * t;
+    result.z = older.z + (newer.z - older.z) * t;
+    result.vx = newer.vx;
+    result.vy = newer.vy;
+    result.vz = newer.vz;
+    result.currentHP = newer.currentHP;
+    result.maxHP = newer.maxHP;
+    result.name = newer.name;
+    result.sequenceId = newer.sequenceId;
+    result.timestamp = renderTime;
 
     return result;
 }
 
-std::optional<net::EntityState> SnapshotBuffer::GetLatestState(uint32_t entityId) const {
-    // Search from newest to oldest
-    for (int i = static_cast<int>(snapshotCount) - 1; i >= 0; --i) {
-        size_t idx = (writeIndex - 1 - i) % MAX_SNAPSHOTS;
-        const auto& snap = snapshots[idx].snapshot;
-
-        auto it = std::ranges::find_if(snap.entities, 
-            [entityId](const auto& e) { return e.entityId == entityId; });
-        if (it != snap.entities.end()) {
-            return *it;
-        }
-    }
-    return std::nullopt;
+void EntityInterpolator::UpdateDeadReckoning(const math::Vector3& velocity, float deltaTime) {
+    predictedPosition = predictedPosition + velocity * deltaTime;
+    predictedVelocity = velocity;
 }
 
-float SnapshotBuffer::GetInterpolationDelay() const {
-    if (snapshotCount < 2) return 0.1f; // Default
+void EntityInterpolator::Reconcile(const InterpSnapshot& serverState) {
+    math::Vector3 serverPos(serverState.x, serverState.y, serverState.z);
+    float error = (serverPos - predictedPosition).Length();
 
-    // Calculate average snapshot interval
-    float totalDelta = 0.0f;
-    int count = 0;
-    for (size_t i = 1; i < snapshotCount; ++i) {
-        size_t curr = (writeIndex - i) % MAX_SNAPSHOTS;
-        size_t prev = (writeIndex - i - 1) % MAX_SNAPSHOTS;
-        float dt = snapshots[curr].snapshot.serverTime - snapshots[prev].snapshot.serverTime;
-        if (dt > 0.0f && dt < 1.0f) { // Sanity check
-            totalDelta += dt;
-            count++;
+    if (error > POSITION_THRESHOLD) {
+        // Sanfte Korrektur (nicht hartes Teleportieren)
+        constexpr float RECONCILE_SPEED = 10.0f;
+        math::Vector3 diff = serverPos - predictedPosition;
+        float reconcileAmount = std::min(error, RECONCILE_SPEED * 0.016f); // ~60Hz
+
+        if (error > 0.0f) {
+            predictedPosition = predictedPosition + diff.Normalized() * reconcileAmount;
         }
+
+        AddLog("[Interp] Reconcile: error={:.2f}m, corrected={:.2f}m", error, reconcileAmount);
     }
-
-    if (count == 0) return 0.1f;
-    float avgInterval = totalDelta / count;
-    return avgInterval * 3.0f; // 3 snapshot buffer
-}
-
-void SnapshotBuffer::CleanupOldSnapshots(float maxAge) {
-    float cutoff = localTime - maxAge;
-    for (auto& snap : snapshots) {
-        if (snap.localReceiveTime < cutoff) {
-            snap.processed = true; // Mark as invalid
-        }
-    }
-}
-
-std::optional<std::pair<net::EntityState, net::EntityState>> 
-SnapshotBuffer::FindSurroundingStates(uint32_t entityId, float renderTime) const {
-
-    std::optional<net::EntityState> from;
-    std::optional<net::EntityState> to;
-
-    for (size_t i = 0; i < snapshotCount; ++i) {
-        size_t idx = (writeIndex - snapshotCount + i) % MAX_SNAPSHOTS;
-        if (snapshots[idx].processed) continue;
-
-        const auto& snap = snapshots[idx].snapshot;
-        auto it = std::ranges::find_if(snap.entities,
-            [entityId](const auto& e) { return e.entityId == entityId; });
-
-        if (it != snap.entities.end()) {
-            if (snap.serverTime <= renderTime) {
-                from = *it;
-            } else if (!to) {
-                to = *it;
-                break;
-            }
-        }
-    }
-
-    if (from && to) {
-        return std::pair(*from, *to);
-    }
-    return std::nullopt;
 }
 
 // =============================================================================
-// EntityInterpolator
+// INTERPOLATION MANAGER
 // =============================================================================
-EntityInterpolator::EntityInterpolator(float delay) : interpolationDelay(delay) {
-    AddLog("[Interpolation] Initialized with {}ms delay", static_cast<int>(delay * 1000));
+
+void InterpolationManager::AddSnapshot(uint32_t entityId, const InterpSnapshot& snap) {
+    entities[entityId].AddSnapshot(snap);
 }
 
-void EntityInterpolator::ReceiveSnapshot(const net::Snapshot& snapshot) {
-    float receiveTime = snapshotBuffer.GetLocalTime();
-    snapshotBuffer.AddSnapshot(snapshot, receiveTime);
+void InterpolationManager::Update(float deltaTime) {
+    auto now = std::chrono::steady_clock::now();
 
-    // Update interpolation delay based on jitter
-    float newDelay = snapshotBuffer.GetInterpolationDelay();
-    interpolationDelay = interpolationDelay * 0.9f + newDelay * 0.1f; // Smooth adaptation
+    for (auto& [id, interpolator] : entities) {
+        if (!interpolator.HasData()) continue;
+
+        auto state = interpolator.Interpolate(now);
+
+        // Speichere interpolierten Zustand für Rendering
+        // (In echtem Renderer würde hier die Transform aktualisiert werden)
+        (void)state; // Verwendet in GetInterpolatedPosition
+    }
 }
 
-void EntityInterpolator::Update(float deltaTime) {
-    snapshotBuffer.UpdateLocalTime(deltaTime);
-
-    float renderTime = snapshotBuffer.GetLocalTime() - interpolationDelay;
-
-    // Get all entity IDs from latest snapshot
-    auto latestIds = GetAllEntityIds();
-
-    for (uint32_t id : latestIds) {
-        auto& entity = entities[id];
-        entity.entityId = id;
-
-        // Try interpolation first
-        auto interp = snapshotBuffer.Interpolate(id, renderTime);
-        if (interp) {
-            entity.isExtrapolating = false;
-            entity.extrapolationTime = 0.0f;
-            ApplySnapshotState(entity, *interp);
-        } else {
-            // Fall back to extrapolation
-            auto latest = snapshotBuffer.GetLatestState(id);
-            if (latest) {
-                if (!entity.isExtrapolating) {
-                    // Start extrapolating from last known position
-                    entity.isExtrapolating = true;
-                    entity.extrapolationTime = 0.0f;
-                    ApplySnapshotState(entity, *latest);
-                }
-                ExtrapolateEntity(entity, deltaTime);
-            }
-        }
-
-        entity.lastUpdateTime = snapshotBuffer.GetLocalTime();
-    }
-
-    // Remove stale entities (not seen in recent snapshots)
-    std::vector<uint32_t> toRemove;
-    for (auto& [id, entity] : entities) {
-        if (snapshotBuffer.GetLocalTime() - entity.lastUpdateTime > 5.0f) {
-            toRemove.push_back(id);
-        }
-    }
-    for (uint32_t id : toRemove) {
-        entities.erase(id);
-    }
-
-    // Cleanup old snapshots
-    snapshotBuffer.CleanupOldSnapshots(5.0f);
-}
-
-const InterpolatedEntity* EntityInterpolator::GetEntity(uint32_t entityId) const {
+math::Vector3 InterpolationManager::GetInterpolatedPosition(uint32_t entityId) const {
     auto it = entities.find(entityId);
-    if (it != entities.end()) return &it->second;
-    return nullptr;
+    if (it == entities.end()) return math::Vector3{};
+
+    auto state = it->second.Interpolate(std::chrono::steady_clock::now());
+    return math::Vector3(state.x, state.y, state.z);
 }
 
-std::vector<uint32_t> EntityInterpolator::GetAllEntityIds() const {
-    std::vector<uint32_t> ids;
-    ids.reserve(entities.size());
-    for (const auto& [id, _] : entities) {
-        ids.push_back(id);
+math::Vector3 InterpolationManager::GetInterpolatedVelocity(uint32_t entityId) const {
+    auto it = entities.find(entityId);
+    if (it == entities.end()) return math::Vector3{};
+
+    auto state = it->second.Interpolate(std::chrono::steady_clock::now());
+    return math::Vector3(state.vx, state.vy, state.vz);
+}
+
+void InterpolationManager::UpdateLocalPlayerInput(const math::Vector3& inputVelocity, 
+                                                   float deltaTime) {
+    if (localPlayerId == 0) return;
+
+    auto it = entities.find(localPlayerId);
+    if (it != entities.end()) {
+        it->second.UpdateDeadReckoning(inputVelocity, deltaTime);
     }
-    return ids;
 }
 
-void EntityInterpolator::RemoveEntity(uint32_t entityId) {
-    entities.erase(entityId);
-}
+void InterpolationManager::RemoveStaleEntities(const std::vector<uint32_t>& activeIds) {
+    std::unordered_set<uint32_t> activeSet(activeIds.begin(), activeIds.end());
 
-void EntityInterpolator::InterpolateEntity(InterpolatedEntity& entity, float renderTime) {
-    // Position is already interpolated in SnapshotBuffer::Interpolate
-    // Just smooth the result
-    // (Currently a no-op since interpolation happens in buffer)
-}
-
-void EntityInterpolator::ExtrapolateEntity(InterpolatedEntity& entity, float deltaTime) {
-    entity.extrapolationTime += deltaTime;
-
-    if (entity.extrapolationTime > maxExtrapolationTime) {
-        // Freeze at last known position
-        entity.velX = 0.0f;
-        entity.velZ = 0.0f;
-        return;
-    }
-
-    // Simple velocity-based extrapolation
-    entity.x += entity.velX * deltaTime;
-    entity.z += entity.velZ * deltaTime;
-}
-
-void EntityInterpolator::ApplySnapshotState(InterpolatedEntity& entity, const net::EntityState& state) {
-    // Calculate velocity from position change
-    if (entity.lastUpdateTime > 0.0f) {
-        float dt = snapshotBuffer.GetLocalTime() - entity.lastUpdateTime;
-        if (dt > 0.001f) {
-            entity.velX = (state.posX - entity.x) / dt;
-            entity.velZ = (state.posZ - entity.z) / dt;
-        }
-    }
-
-    entity.x = state.posX;
-    entity.y = state.posY;
-    entity.z = state.posZ;
-    entity.rotY = state.rotY;
-    entity.currentHP = state.currentHP;
-    entity.maxHP = state.maxHP;
-    entity.animState = state.animState;
-    entity.animTime = state.animTime;
-    entity.statusMask = state.statusMask;
-}
-
-bool EntityInterpolator::IsJitterAcceptable() const {
-    return GetAverageJitter() < 0.005f; // 5ms threshold
-}
-
-float EntityInterpolator::GetAverageJitter() const {
-    // Simplified jitter calculation
-    // In production: track arrival time variance
-    return 0.0f; // Placeholder
+    std::erase_if(entities, [&activeSet](const auto& pair) {
+        return !activeSet.contains(pair.first);
+    });
 }
 
 } // namespace client
