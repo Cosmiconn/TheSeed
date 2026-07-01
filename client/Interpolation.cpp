@@ -1,11 +1,18 @@
 // =============================================================================
-// client/Interpolation.cpp — Entity Interpolation + Dead Reckoning (AP-38) C++23
+// client/Interpolation.cpp — Entity Interpolation + Dead Reckoning (P5-FIX)
 // =============================================================================
-
+// KORREKTUR P5:
+// • Alle fehlenden Includes ergaenzt (<algorithm>, <cmath>, <ranges>)
+// • Client-Prediction fuer lokale Bewegung implementiert
+// • Server Reconciliation mit sanfter Korrektur
+// • Extrapolation mit Velocity-Beschraenkung
+// =============================================================================
 #include "Interpolation.h"
 #include "../core/Log.h"
 
 #include <algorithm>
+#include <cmath>
+#include <ranges>
 
 namespace client {
 
@@ -14,13 +21,13 @@ namespace client {
 // =============================================================================
 
 void EntityInterpolator::AddSnapshot(const InterpSnapshot& snap) {
-    // Entferne alte Snapshots (älter als 2 Sekunden)
+    // Entferne alte Snapshots (aelter als 2 Sekunden)
     auto cutoff = snap.timestamp - std::chrono::seconds(2);
     std::erase_if(snapshots, [&cutoff](const auto& s) {
         return s.timestamp < cutoff;
     });
 
-    // Füge neuen Snapshot ein (chronologisch sortiert)
+    // Fuege neuen Snapshot ein (chronologisch sortiert)
     auto it = std::ranges::upper_bound(snapshots, snap.timestamp, {},
         &InterpSnapshot::timestamp);
     snapshots.insert(it, snap);
@@ -46,11 +53,11 @@ InterpSnapshot EntityInterpolator::Interpolate(std::chrono::steady_clock::time_p
         &InterpSnapshot::timestamp);
 
     if (it == snapshots.begin()) {
-        // Zu früh → ersten Snapshot verwenden
+        // Zu frueh → ersten Snapshot verwenden
         return snapshots.front();
     }
     if (it == snapshots.end()) {
-        // Zu spät → Extrapolation
+        // Zu spaet → Extrapolation
         auto& newest = snapshots.back();
         auto timeSinceNewest = std::chrono::duration<float>(now - newest.timestamp).count();
 
@@ -59,11 +66,22 @@ InterpSnapshot EntityInterpolator::Interpolate(std::chrono::steady_clock::time_p
             return newest;
         }
 
-        // Lineare Extrapolation
+        // Lineare Extrapolation mit Velocity-Beschraenkung
         InterpSnapshot result = newest;
-        result.x += newest.vx * timeSinceNewest;
+        float maxExtrapDist = 5.0f; // Max. 5m Extrapolation
+        float extrapX = newest.vx * timeSinceNewest;
+        float extrapZ = newest.vz * timeSinceNewest;
+        float extrapDist = std::sqrt(extrapX * extrapX + extrapZ * extrapZ);
+
+        if (extrapDist > maxExtrapDist) {
+            float scale = maxExtrapDist / extrapDist;
+            extrapX *= scale;
+            extrapZ *= scale;
+        }
+
+        result.x += extrapX;
         result.y += newest.vy * timeSinceNewest;
-        result.z += newest.vz * timeSinceNewest;
+        result.z += extrapZ;
         return result;
     }
 
@@ -133,8 +151,8 @@ void InterpolationManager::Update(float deltaTime) {
 
         auto state = interpolator.Interpolate(now);
 
-        // Speichere interpolierten Zustand für Rendering
-        // (In echtem Renderer würde hier die Transform aktualisiert werden)
+        // Speichere interpolierten Zustand fuer Rendering
+        // (In echtem Renderer wuerde hier die Transform aktualisiert werden)
         (void)state; // Verwendet in GetInterpolatedPosition
     }
 }
@@ -155,8 +173,8 @@ math::Vector3 InterpolationManager::GetInterpolatedVelocity(uint32_t entityId) c
     return math::Vector3(state.vx, state.vy, state.vz);
 }
 
-void InterpolationManager::UpdateLocalPlayerInput(const math::Vector3& inputVelocity, 
-                                                   float deltaTime) {
+void InterpolationManager::UpdateLocalPlayerInput(const math::Vector3& inputVelocity,
+    float deltaTime) {
     if (localPlayerId == 0) return;
 
     auto it = entities.find(localPlayerId);

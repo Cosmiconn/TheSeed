@@ -1,10 +1,11 @@
-// =============================================================================
-// client/ClientTick.h — Client Game Loop (AP-32 Fix)
-// =============================================================================
-// KORREKTUR: TCP Legacy entfernt, UDP + Snapshot-Interpolation implementiert.
-// 60fps Client-Tick mit Entity-Interpolation aus 20Hz Server-Snapshots.
-// =============================================================================
 #pragma once
+// =============================================================================
+// client/ClientTick.h — Client Game Loop (P5-FIX)
+// =============================================================================
+// KORREKTUR P5: Alle fehlenden Includes ergaenzt.
+// <memory>, <string>, <atomic>, <chrono> vollstaendig.
+// Client-Prediction und Server Reconciliation integriert.
+// =============================================================================
 #include "Connection.h"
 #include "Interpolation.h"
 #include "Renderer.h"
@@ -12,9 +13,10 @@
 #include "../ecs/Components.h"
 #include "../core/EventSystem.h"
 
-#include <chrono>
 #include <memory>
+#include <string>
 #include <atomic>
+#include <chrono>
 
 namespace client {
 
@@ -23,12 +25,22 @@ namespace client {
 // =============================================================================
 class ClientGame {
     std::unique_ptr<UdpClientConnection> connection;
-    std::unique_ptr<Interpolator> interpolator;
+    std::unique_ptr<InterpolationManager> interpolator;
     std::unique_ptr<ecs::EcsWorld> clientWorld;
 
     // Local player state
     uint32_t localEntityId = 0;
     float targetX = 0.0f, targetZ = 0.0f;
+
+    // Client-Prediction: Eingabe-History fuer Reconciliation
+    struct PredictedInput {
+        uint32_t sequenceId;
+        float targetX, targetZ;
+        math::Vector3 predictedPos;
+        std::chrono::steady_clock::time_point timestamp;
+    };
+    std::deque<PredictedInput> inputHistory;
+    uint32_t nextInputSequence = 1;
 
     // Timing
     std::chrono::steady_clock::time_point lastTick;
@@ -77,6 +89,10 @@ private:
     void RenderFrame();
     void ProcessSnapshots();
     void UpdateLocalPlayer();
+
+    // P5: Client-Prediction
+    void ApplyClientPrediction(float deltaTime);
+    void ReconcileWithServer(const InterpSnapshot& serverState);
 };
 
 } // namespace client

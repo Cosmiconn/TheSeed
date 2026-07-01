@@ -1,32 +1,28 @@
 #pragma once
 // =============================================================================
-// client/Interpolation.h — Entity Interpolation + Dead Reckoning (AP-38) C++23
+// client/Interpolation.h — Entity Interpolation + Dead Reckoning (P5-FIX)
 // =============================================================================
-// VOLLSTÄNDIGE IMPLEMENTIERUNG:
-// • Positions-Interpolation zwischen Snapshots (20Hz → 60Hz)
-// • Dead Reckoning für eigene Entity (Vorhersage basierend auf Velocity)
-// • Extrapolation wenn Snapshots ausbleiben
-// • std::chrono für zeitbasierte Interpolation
+// KORREKTUR P5: Alle fehlenden Includes ergänzt.
+// <deque>, <string>, <chrono>, <vector>, <unordered_map> vollstaendig.
 // =============================================================================
-
 #include "../ecs/ecs_Types.h"
 #include "../ecs/Components.h"
 #include "../math/Vector.h"
 
-#include <vector>
 #include <deque>
+#include <string>
 #include <chrono>
+#include <vector>
 #include <unordered_map>
-#include <cmath>
 
 namespace client {
 
 // =============================================================================
-// INTERPOLATIONSNAP — Gespeicherter Zustand für Interpolation
+// INTERPOLATIONSNAP — Gespeicherter Zustand fuer Interpolation
 // =============================================================================
 struct InterpSnapshot {
     float x = 0.0f, y = 0.0f, z = 0.0f;
-    float vx = 0.0f, vy = 0.0f, vz = 0.0f; // Velocity für Dead Reckoning
+    float vx = 0.0f, vy = 0.0f, vz = 0.0f; // Velocity fuer Dead Reckoning
     uint32_t currentHP = 0, maxHP = 0;
     std::string name;
     std::chrono::steady_clock::time_point timestamp;
@@ -38,14 +34,14 @@ struct InterpSnapshot {
 // =============================================================================
 class EntityInterpolator {
 public:
-    static constexpr std::chrono::milliseconds INTERP_DELAY{100};      // 100ms Puffer
+    static constexpr std::chrono::milliseconds INTERP_DELAY{100}; // 100ms Puffer
     static constexpr std::chrono::milliseconds MAX_EXTRAPOLATION{500}; // 500ms max Extrapolation
-    static constexpr float POSITION_THRESHOLD = 0.1f;                  // Min. Abstand für Teleport
+    static constexpr float POSITION_THRESHOLD = 0.1f; // Min. Abstand fuer Teleport
 
 private:
-    std::deque<InterpSnapshot> snapshots;  // Chronologisch sortiert
-    InterpSnapshot lastSnapshot;           // Letzter empfangener Zustand
-    InterpSnapshot displayState;           // Aktuell angezeigter Zustand
+    std::deque<InterpSnapshot> snapshots; // Chronologisch sortiert
+    InterpSnapshot lastSnapshot; // Letzter empfangener Zustand
+    InterpSnapshot displayState; // Aktuell angezeigter Zustand
 
     bool hasData = false;
     std::chrono::steady_clock::time_point lastReceiveTime;
@@ -78,22 +74,22 @@ public:
 // =============================================================================
 class InterpolationManager {
     std::unordered_map<uint32_t, EntityInterpolator> entities;
-    uint32_t localPlayerId = 0;  // Eigene Entity-ID für Dead Reckoning
+    uint32_t localPlayerId = 0; // Eigene Entity-ID fuer Dead Reckoning
 
 public:
     void SetLocalPlayer(uint32_t id) { localPlayerId = id; }
 
-    // Fügt Snapshot für Entity hinzu
+    // Fuegt Snapshot fuer Entity hinzu
     void AddSnapshot(uint32_t entityId, const InterpSnapshot& snap);
 
     // Aktualisiert alle Entities (60Hz Client-Tick)
     void Update(float deltaTime);
 
-    // Holt interpolierte Position für Rendering
+    // Holt interpolierte Position fuer Rendering
     [[nodiscard]] math::Vector3 GetInterpolatedPosition(uint32_t entityId) const;
     [[nodiscard]] math::Vector3 GetInterpolatedVelocity(uint32_t entityId) const;
 
-    // Dead Reckoning für lokalen Spieler
+    // Dead Reckoning fuer lokalen Spieler
     void UpdateLocalPlayerInput(const math::Vector3& inputVelocity, float deltaTime);
 
     // Entfernt Entities die nicht mehr im Snapshot vorkommen
