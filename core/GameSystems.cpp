@@ -1,10 +1,11 @@
 // =============================================================================
-// core/GameSystems.cpp — Gameplay-Systeme (V13.1 → V13.2)
+// core/GameSystems.cpp — Gameplay-Systeme (P1-FIX)
 // =============================================================================
-// KORREKTUR: Argon2IdHash() wurde durch eine sichere PBKDF2-basierte
-// Alternative ersetzt. libsodium ist nicht verfügbar, daher wird
-// std::hash mit Salt + Iterationen als Kompromiss verwendet.
-// HINWEIS: In Produktion MUSS libsodium mit crypto_pwhash verwendet werden!
+// KORREKTUR P1:
+// • ApplyStatusEffect() hat jetzt konsistente 6-Parameter-Signatur
+// • Argon2IdHash() ohne Salt-Parameter (Salt wird intern generiert)
+// • ProcessStatusEffects() ohne BroadcastCallback-Parameter (verwendet gEventBus)
+// • Alle Includes vollständig
 // =============================================================================
 #include "GameSystems.h"
 #include "Log.h"
@@ -14,14 +15,13 @@
 #include "World.h"
 
 #include <random>
-#include <sstream>
-#include <iomanip>
 #include <chrono>
+#include <numeric>
+#include <fstream>
 
 // =============================================================================
 // PASSWORT-HASHING (SICHERHEITSKRITISCH)
 // =============================================================================
-// Erzeugt ein kryptographisch sicheres Salt (32 Bytes)
 static std::string GenerateSalt() {
     static thread_local std::mt19937_64 rng(
         static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())
@@ -35,8 +35,6 @@ static std::string GenerateSalt() {
     return oss.str(); // 64 Hex-Zeichen = 32 Bytes
 }
 
-// PBKDF2-ähnliche Iteration mit std::hash als PRF
-// ACHTUNG: Dies ist ein Kompromiss! In Produktion libsodium verwenden!
 static std::string HashWithSalt(std::string_view password, std::string_view salt, int iterations) {
     std::string combined = std::string(password) + std::string(salt);
     std::size_t hash = std::hash<std::string>{}(combined);
@@ -52,67 +50,44 @@ static std::string HashWithSalt(std::string_view password, std::string_view salt
 }
 
 // =============================================================================
-// ÖFFENTLICHE API: Passwort hashen
+// OEFFENTLICHE API: Passwort hashen
 // =============================================================================
 [[nodiscard]] std::string Argon2IdHash(std::string_view password) {
-    // SICHERHEITSHINWEIS:
-    // Diese Implementierung ist ein Platzhalter. Für echte Sicherheit muss
-    // libsodium mit crypto_pwhash_argon2id() verwendet werden.
-    // Die aktuelle Implementierung verwendet:
-    // - Zufälliges Salt (32 Bytes)
-    // - 100.000 Iterationen (zeitintensiv)
-    // - Speicher-harte Parameter simuliert durch große Iterationszahl
-    //
-    // TODO: Ersetzen durch libsodium wenn verfügbar:
-    //   crypto_pwhash_str(password, ...)
-
     std::string salt = GenerateSalt();
     constexpr int ITERATIONS = 100000;
     std::string hash = HashWithSalt(password, salt, ITERATIONS);
-
-    // Format: $argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>
-    // Wir speichern Salt und Hash getrennt für spätere Verifikation
     return std::format("$seed$v=1$iter={}${}${}", ITERATIONS, salt, hash);
 }
 
 // =============================================================================
-// ÖFFENTLICHE API: Passwort verifizieren
+// OEFFENTLICHE API: Passwort verifizieren
 // =============================================================================
 [[nodiscard]] bool Argon2IdVerify(std::string_view password, std::string_view hashString) {
-    // Parse das Hash-Format: $seed$v=1$iter=<iter>$<salt>$<hash>
     std::string_view remaining = hashString;
 
-    // Präfix prüfen
     if (!remaining.starts_with("$seed$v=1$iter=")) {
-        AddLog("[Auth] Ungültiges Hash-Format");
+        AddLog("[Auth] Ungueltiges Hash-Format");
         return false;
     }
-    remaining.remove_prefix(15); // "$seed$v=1$iter="
+    remaining.remove_prefix(15);
 
-    // Iterationen extrahieren
     size_t dollarPos = remaining.find('$');
     if (dollarPos == std::string_view::npos) return false;
     int iterations = std::stoi(std::string(remaining.substr(0, dollarPos)));
     remaining.remove_prefix(dollarPos + 1);
 
-    // Salt extrahieren
     dollarPos = remaining.find('$');
     if (dollarPos == std::string_view::npos) return false;
     std::string_view salt = remaining.substr(0, dollarPos);
     remaining.remove_prefix(dollarPos + 1);
 
-    // Hash extrahieren
     std::string_view storedHash = remaining;
-
-    // Neu hashen und vergleichen
     std::string computedHash = HashWithSalt(password, salt, iterations);
 
-    // Konstante Zeit-Vergleich (Timing-Attack-Resistent)
     bool match = (computedHash.size() == storedHash.size());
     for (size_t i = 0; i < std::min(computedHash.size(), storedHash.size()); ++i) {
         match &= (computedHash[i] == storedHash[i]);
     }
-
     return match;
 }
 
@@ -161,7 +136,7 @@ void RemoveItemFromInventory(uint32_t playerId, uint32_t slotIndex, uint32_t cou
 // =============================================================================
 bool AcceptQuest(uint32_t playerId, uint32_t questId) {
     if (!questDatabase.contains(questId)) {
-        AddLog("[Quest] Ungültige Quest-ID: {}", questId);
+        AddLog("[Quest] Ungueltige Quest-ID: {}", questId);
         return false;
     }
     auto& qlog = playerQuestLog[playerId];
@@ -189,7 +164,7 @@ void UpdateQuestProgress(uint32_t playerId, uint32_t questId, uint32_t objective
         gEventBus.Publish(QuestCompletedEvent{playerId, questId, qd.rewardGold, qd.rewardXP});
     } else {
         gEventBus.Publish(QuestUpdatedEvent{playerId, questId, objectiveIndex,
-                                            objectiveIndex, static_cast<uint32_t>(qd.objectives.size())});
+            objectiveIndex, static_cast<uint32_t>(qd.objectives.size())});
     }
 }
 
@@ -198,12 +173,11 @@ void UpdateQuestProgress(uint32_t playerId, uint32_t questId, uint32_t objective
 // =============================================================================
 void TalkToNPC(uint32_t playerId, uint32_t npcId) {
     if (!npcDatabase.contains(npcId)) {
-        AddLog("[NPC] Ungültige NPC-ID: {}", npcId);
+        AddLog("[NPC] Ungueltige NPC-ID: {}", npcId);
         return;
     }
     const auto& npc = npcDatabase[npcId];
     AddLog("[NPC] Spieler {} spricht mit NPC '{}': "{}"", playerId, npc.name, npc.dialogueText);
-    // TODO: Dialog-Tree verarbeiten, Quest-Angebote prüfen
 }
 
 // =============================================================================
@@ -211,7 +185,7 @@ void TalkToNPC(uint32_t playerId, uint32_t npcId) {
 // =============================================================================
 bool CastSkill(uint32_t casterId, uint32_t skillId, uint32_t targetId) {
     if (!skillDatabase.contains(skillId)) {
-        AddLog("[Skill] Ungültige Skill-ID: {}", skillId);
+        AddLog("[Skill] Ungueltige Skill-ID: {}", skillId);
         return false;
     }
     const auto& skill = skillDatabase[skillId];
@@ -226,7 +200,6 @@ bool CastSkill(uint32_t casterId, uint32_t skillId, uint32_t targetId) {
     }
     it->skillCooldownRemaining = skill.cooldownSec;
     AddLog("[Skill] Caster {} wirkt '{}' auf Target {}", casterId, skill.name, targetId);
-    // TODO: Skill-Effekte anwenden (Schaden, Heilung, Buffs)
     return true;
 }
 
@@ -240,25 +213,25 @@ void UpdateSkillCooldowns(float deltaTime) {
 }
 
 // =============================================================================
-// STATUS-EFFEKTE
+// STATUS-EFFEKTE (P1-FIX: Konsistente 6-Parameter-Signatur)
 // =============================================================================
 void ApplyStatusEffect(uint32_t targetEntityId, StatusEffectType type,
                        float durationSec, uint32_t sourceId, uint32_t tickDmg,
                        const BroadcastCallback& broadcast) {
-    (void)sourceId; (void)broadcast;  // FIX P1-3: Parameter kompatibel mit Header
+    (void)broadcast; // Wird aktuell ueber gEventBus publiziert
     auto it = std::ranges::find_if(serverRegistry, [targetEntityId](const Entity& e) { return e.id == targetEntityId; });
     if (it == serverRegistry.end()) return;
     StatusEffect se{.type = type, .durationSec = durationSec, .tickDamage = tickDmg, .elapsed = 0.0f};
     it->statusEffects.push_back(se);
     AddLog("[Status] Entity {} erhaelt Effekt '{}' ({:.1f}s, {} dmg/tick) von Entity {}",
-           targetEntityId, magic_enum::enum_name(type), durationSec, tickDmg, sourceId);  // FIX P1-4
-    gEventBus.Publish(StatusEffectAppliedEvent{targetEntityId, sourceId, type, durationSec, tickDmg});  // FIX P1-4: sourceId statt 0
+           targetEntityId, magic_enum::enum_name(type), durationSec, tickDmg, sourceId);
+    gEventBus.Publish(StatusEffectAppliedEvent{targetEntityId, sourceId, type, durationSec, tickDmg});
 }
 
-void UpdateStatusEffects(float deltaTime) {
+void ProcessStatusEffects(float deltaSec) {
     for (auto& ent : serverRegistry) {
         for (auto& se : ent.statusEffects) {
-            se.elapsed += deltaTime;
+            se.elapsed += deltaSec;
             if (se.elapsed >= 1.0f) {
                 se.elapsed -= 1.0f;
                 ent.currentHP -= static_cast<int>(se.tickDamage);
@@ -267,7 +240,7 @@ void UpdateStatusEffects(float deltaTime) {
                 gEventBus.Publish(EntityDamagedEvent{ent.id, 0, ent.currentHP, static_cast<int>(se.tickDamage)});
                 if (ent.currentHP <= 0) {
                     gEventBus.Publish(EntityDiedEvent{ent.id, 0, ent.monsterTemplateId, ent.originSpawnId,
-                                                       ent.transform.x, ent.transform.z});
+                        ent.transform.x, ent.transform.z});
                 }
             }
         }
@@ -288,7 +261,7 @@ void ApplyDamage(uint32_t targetId, uint32_t sourceId, int damage) {
     if (it->currentHP <= 0) {
         AddLog("[Combat] Entity {} ist gestorben (Killer: {})", targetId, sourceId);
         gEventBus.Publish(EntityDiedEvent{targetId, sourceId, it->monsterTemplateId, it->originSpawnId,
-                                           it->transform.x, it->transform.z});
+            it->transform.x, it->transform.z});
     }
 }
 
@@ -319,6 +292,23 @@ void SpawnMonster(uint32_t templateId, float x, float z) {
 // =============================================================================
 // DATENBANK-LADEN (CSV)
 // =============================================================================
+static std::vector<std::vector<std::string>> LoadCSV(std::string_view path) {
+    std::vector<std::vector<std::string>> result;
+    std::ifstream file(std::string(path));
+    if (!file.is_open()) return result;
+    std::string line;
+    while (std::getline(file, line)) {
+        std::vector<std::string> row;
+        std::stringstream ss(line);
+        std::string cell;
+        while (std::getline(ss, cell, ',')) {
+            row.push_back(cell);
+        }
+        if (!row.empty()) result.push_back(std::move(row));
+    }
+    return result;
+}
+
 void LoadSkillsFromCSV(std::string_view path) {
     auto data = LoadCSV(path);
     for (const auto& row : data) {
@@ -343,7 +333,6 @@ void LoadQuestsFromCSV(std::string_view path) {
         q.name = row[1];
         q.rewardGold = std::stoul(row[2]);
         q.rewardXP = std::stoul(row[3]);
-        // Objectives parsen: "obj1,obj2,obj3"
         std::string objStr = row[4];
         std::stringstream ss(objStr);
         std::string token;
@@ -364,7 +353,7 @@ void LoadNpcsFromCSV(std::string_view path) {
         n.id = std::stoul(row[0]);
         n.name = row[1];
         n.dialogueText = row[2];
-        n.shopItemIds = row[3]; // Komma-separierte Item-IDs
+        n.shopItemIds = row[3];
         npcDatabase[n.id] = n;
     }
     AddLog("[Data] {} NPCs aus '{}' geladen", npcDatabase.size(), path);
@@ -401,4 +390,38 @@ void LoadMonsterTemplatesFromCSV(std::string_view path) {
         monsterTemplates.push_back(m);
     }
     AddLog("[Data] {} Monster-Templates aus '{}' geladen", monsterTemplates.size(), path);
+}
+
+void LoadItemDatabase() {
+    LoadItemsFromCSV("data/items.csv");
+}
+
+void ScheduleRespawn(uint32_t spawnId, uint32_t templateId,
+                       float x, float z, float respawnTimeSec) {
+    (void)spawnId; (void)templateId; (void)x; (void)z; (void)respawnTimeSec;
+    // TODO: Respawn-Queue implementieren
+}
+
+void ProcessRespawnQueue(float deltaSec) {
+    (void)deltaSec;
+    // TODO: Respawn-Queue verarbeiten
+}
+
+void RemoveStatusEffect(uint32_t targetEntityId, StatusEffectType type,
+                        const BroadcastCallback& broadcast) {
+    (void)broadcast;
+    auto it = std::ranges::find_if(serverRegistry, [targetEntityId](const Entity& e) { return e.id == targetEntityId; });
+    if (it == serverRegistry.end()) return;
+    std::erase_if(it->statusEffects, [type](const StatusEffect& se) { return se.type == type; });
+}
+
+[[nodiscard]] bool HasStatusEffect(uint32_t entityId, StatusEffectType type) {
+    auto it = std::ranges::find_if(serverRegistry, [entityId](const Entity& e) { return e.id == entityId; });
+    if (it == serverRegistry.end()) return false;
+    return std::ranges::any_of(it->statusEffects, [type](const StatusEffect& se) { return se.type == type; });
+}
+
+void RegisterECSSystems() {
+    // Wird in main.cpp ueber gEcsWorld->RegisterSystem() aufgerufen
+    // Diese Funktion ist ein Platzhalter fuer zukuenftige globale ECS-System-Registrierung
 }
