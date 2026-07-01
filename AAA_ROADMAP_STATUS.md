@@ -2,14 +2,14 @@
 
 **Engine:** TheSeed C++23 MMORPG Engine V13.2
 **Letzte Aktualisierung:** 2026-07-01
-**Gesamtfortschritt:** 58/97 APs (60%)
+**Gesamtfortschritt:** 60/97 APs (62%)
 
 ---
 
 ## Phase 1: Fundament & Rendering (19 APs)
 
-| AP | Beschreibung | Status | Priorität |
-|----|-------------|--------|-----------|
+| AP | Beschreibung | Status | Prioritaet |
+|----|-------------|--------|------------|
 | AP-01 | OpenGL 4.6 Core Profile Renderer | ✅ Erledigt | P0 |
 | AP-02 | Deferred Shading Pipeline | 🔴 Offen | P5 |
 | AP-03 | Shadow Maps (Single) | ✅ Erledigt | P0 |
@@ -36,8 +36,8 @@
 
 ## Phase 2: ECS & Parallelisierung (12 APs)
 
-| AP | Beschreibung | Status | Priorität |
-|----|-------------|--------|-----------|
+| AP | Beschreibung | Status | Prioritaet |
+|----|-------------|--------|------------|
 | AP-20 | Archetype-basiertes ECS (SOA) | ✅ Erledigt (P1) | P1 |
 | AP-21 | Component-Level Read-Write Locks | ✅ Erledigt (P1) | P1 |
 | AP-22 | Entity-Component Query System | ✅ Erledigt (P1) | P1 |
@@ -49,16 +49,16 @@
 | AP-28 | Component Traits (Type-Safe) | ✅ Erledigt (P1) | P1 |
 | AP-29 | System Dependency Graph | 🟡 Teilweise | P5 |
 | AP-30 | ECS-Legacy Sync | ✅ Erledigt (P1) | P1 |
-| AP-31 | ECS Memory Tracking | ✅ Erledigt (P1) | P1 |
+| AP-31 | ECS Memory Tracking | ✅ Erledigt (Changelog_0012) | P4 |
 
-**Phase 2: 10/12 erledigt (83%), 1 teilweise, 1 offen**
+**Phase 2: 11/12 erledigt (92%), 1 teilweise, 0 offen**
 
 ---
 
 ## Phase 3: Netzwerk & Multiplayer (15 APs)
 
-| AP | Beschreibung | Status | Priorität |
-|----|-------------|--------|-----------|
+| AP | Beschreibung | Status | Prioritaet |
+|----|-------------|--------|------------|
 | AP-32 | UDP Socket (Non-blocking) | ✅ Erledigt | P0 |
 | AP-33 | Reliable UDP (SACK, RTT) | ✅ Erledigt | P0 |
 | AP-34 | Snapshot System (20Hz) | ✅ Erledigt (P2) | P2 |
@@ -81,8 +81,8 @@
 
 ## Phase 4: Gameplay-Systeme (21 APs)
 
-| AP | Beschreibung | Status | Priorität |
-|----|-------------|--------|-----------|
+| AP | Beschreibung | Status | Prioritaet |
+|----|-------------|--------|------------|
 | AP-47 | Inventory System | ✅ Erledigt | P0 |
 | AP-48 | Quest System | ✅ Erledigt | P0 |
 | AP-49 | Skill System (Cooldowns) | ✅ Erledigt | P0 |
@@ -111,8 +111,8 @@
 
 ## Phase 5: Tools & Pipeline (17 APs)
 
-| AP | Beschreibung | Status | Priorität |
-|----|-------------|--------|-----------|
+| AP | Beschreibung | Status | Prioritaet |
+|----|-------------|--------|------------|
 | AP-68 | In-Engine Editor (ImGui) | ✅ Erledigt | P0 |
 | AP-69 | Editor Panels | 🟡 Teilweise | P5 |
 | AP-70 | Asset Database (Editor) | 🟡 Teilweise | P5 |
@@ -123,22 +123,22 @@
 | AP-75 | vcpkg Dependency Management | ✅ Erledigt (P3) | P3 |
 | AP-76 | CI/CD (GitHub Actions) | 🟡 Teilweise | P5 |
 | AP-77 | Unit Tests | ✅ Erledigt (P5) | P5 |
-| AP-78 | Integration Tests | 🔴 Offen | P5 |
+| AP-78 | Integration Tests | ✅ Erledigt (Changelog_0011) | P5 |
 | AP-79 | Performance Benchmarks | ✅ Erledigt (P5) | P5 |
-| AP-80 | Memory Profiler | 🔴 Offen | P4 |
+| AP-80 | Memory Profiler | ✅ Erledigt (Changelog_0012) | P4 |
 | AP-81 | Network Profiler | 🔴 Offen | P4 |
 | AP-82 | Shader Hot-Reload | 🔴 Offen | P5 |
 | AP-83 | Asset Hot-Reload | 🔴 Offen | P5 |
 | AP-84 | Debug Console | 🔴 Offen | P5 |
 
-**Phase 5: 4/17 erledigt (24%), 5 teilweise, 8 offen**
+**Phase 5: 6/17 erledigt (35%), 5 teilweise, 6 offen**
 
 ---
 
 ## Phase 6: Polishing & Skalierung (13 APs)
 
-| AP | Beschreibung | Status | Priorität |
-|----|-------------|--------|-----------|
+| AP | Beschreibung | Status | Prioritaet |
+|----|-------------|--------|------------|
 | AP-85 | Authentication (Argon2id, JWT) | ✅ Erledigt (P3) | P3 |
 | AP-86 | Authorization (RBAC) | 🟡 Teilweise | P3 |
 | AP-87 | Rate Limiting (Redis) | ✅ Erledigt (P3) | P3 |
@@ -162,34 +162,19 @@
 | Phase | Erledigt | Teilweise | Offen | Fortschritt |
 |-------|----------|-----------|-------|-------------|
 | Phase 1: Fundament & Rendering | 4 | 5 | 10 | 21% |
-| Phase 2: ECS & Parallelisierung | 10 | 1 | 1 | 83% |
+| Phase 2: ECS & Parallelisierung | 11 | 1 | 0 | 92% |
 | Phase 3: Netzwerk & Multiplayer | 13 | 1 | 1 | 87% |
 | Phase 4: Gameplay-Systeme | 18 | 0 | 3 | 86% |
-| Phase 5: Tools & Pipeline | 4 | 5 | 8 | 24% |
+| Phase 5: Tools & Pipeline | 6 | 5 | 6 | 35% |
 | Phase 6: Polishing & Skalierung | 5 | 1 | 7 | 38% |
-| **GESAMT** | **54** | **13** | **30** | **60%** |
+| **GESAMT** | **57** | **13** | **27** | **62%** |
 
 ---
 
-## Prioritäten-Status
+## Naechste Meilensteine
 
-| Priorität | Punkte | Erledigt | Status |
-|-----------|--------|----------|--------|
-| P0 — Build-Blocker & Sicherheit | 10 | 10/10 | ✅ Abgeschlossen |
-| P1 — Architektur & Stabilität | 4 | 4/4 | ✅ Abgeschlossen |
-| P2 — Netzwerk & Snapshot | 5 | 5/5 | ✅ Abgeschlossen |
-| P3 — Auth & Persistenz | 4 | 4/4 | ✅ Abgeschlossen |
-| P4 — Performance | 5 | 5/5 | ✅ Abgeschlossen |
-| P5 — Feature-Vervollständigung | 7 | 7/7 | ✅ Abgeschlossen |
-
----
-
-## Nächste Meilensteine
-
-1. **AP-02:** Deferred Shading Pipeline
-2. **AP-05:** PBR Material System
-3. **AP-76:** CI/CD (GitHub Actions)
-4. **AP-78:** Integration Tests
-5. **AP-80:** Memory Profiler
-6. **AP-81:** Network Profiler
-7. **AP-91:** Metrics Dashboard
+1. **AP-81:** Network Profiler
+2. **AP-91:** Metrics Dashboard
+3. **AP-02:** Deferred Shading Pipeline
+4. **AP-05:** PBR Material System
+5. **AP-76:** CI/CD vollstaendig
