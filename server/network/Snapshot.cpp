@@ -1,8 +1,10 @@
 // =============================================================================
-// server/network/Snapshot.cpp — Delta-Kompression + Interest Management (AP-37/AP-40)
+// server/network/Snapshot.cpp — Delta-Kompression + Interest Management (P2-FIX)
 // =============================================================================
-// KORREKTUR: Delta-Kompression + Spatial Hash Interest Management vollständig
-// implementiert. Sendet nur geänderte Felder + nur Entities im AOI.
+// KORREKTUR P2:
+// • FragmentSnapshot() und SendFragmentedSnapshot() jetzt INNERHALB namespace net
+// • Delta-Kompression mit Spatial Hash Interest Management vollständig
+// • Sendet nur geänderte Felder + nur Entities im AOI
 // =============================================================================
 #include "Snapshot.h"
 #include "../../core/Log.h"
@@ -106,13 +108,14 @@ void SnapshotBuilder::UpdateSpatialHash(ecs::EcsWorld& world) {
     std::lock_guard lock(spatialMutex);
     spatialHash.Clear();
 
-    auto query = world.Query<game::Transform>();
-    for (auto [handle] : query) {
-        auto* transform = world.GetComponent<game::Transform>(handle);
-        auto* legacy = world.GetComponent<game::LegacyId>(handle);
+    auto query = world.QueryEntities<ecs::PositionComponent>();
+    for (auto [handle, pos] : query) {
+        (void)pos;
+        auto* transform = world.GetComponent<ecs::PositionComponent>(handle);
+        auto* legacy = world.GetComponent<ecs::LegacyIdComponent>(handle);
         if (!transform) continue;
 
-        uint32_t id = legacy ? legacy->id : static_cast<uint32_t>(handle.GetIndex());
+        uint32_t id = legacy ? legacy->legacyId : static_cast<uint32_t>(handle.GetIndex());
         spatialHash.Insert(id, transform->x, transform->z);
     }
 }
@@ -127,39 +130,43 @@ EntityState SnapshotBuilder::ExtractEntityState(
     EntityState state{};
     state.id = static_cast<uint32_t>(handle.GetIndex());
 
-    auto* transform = world.GetComponent<game::Transform>(handle);
+    auto* transform = world.GetComponent<ecs::PositionComponent>(handle);
     if (transform) {
         state.x = transform->x;
         state.y = transform->y;
         state.z = transform->z;
-        state.rotationY = transform->rotationY;
     }
 
-    auto* velocity = world.GetComponent<game::Velocity>(handle);
+    auto* rotation = world.GetComponent<ecs::RotationComponent>(handle);
+    if (rotation) {
+        state.rotationY = rotation->yaw;
+    }
+
+    auto* velocity = world.GetComponent<ecs::VelocityComponent>(handle);
     if (velocity) {
         state.vx = velocity->vx;
         state.vz = velocity->vz;
     }
 
-    auto* health = world.GetComponent<game::Health>(handle);
+    auto* health = world.GetComponent<ecs::HealthComponent>(handle);
     if (health) {
-        state.currentHP = static_cast<uint32_t>(health->currentHP);  // FIX P2: Feldname
-        state.maxHP = static_cast<uint32_t>(health->maxHP);  // FIX P2: Feldname
+        state.currentHP = static_cast<uint32_t>(health->currentHP);
+        state.maxHP = static_cast<uint32_t>(health->maxHP);
     }
 
-    auto* name = world.GetComponent<game::Name>(handle);
+    auto* name = world.GetComponent<ecs::NameComponent>(handle);
     if (name) {
         state.name = name->name;
     }
 
-    auto* render = world.GetComponent<game::RenderInfo>(handle);
+    auto* render = world.GetComponent<ecs::RenderComponentECS>(handle);
     if (render) {
         state.materialId = render->materialId;
     }
 
-    auto* legacy = world.GetComponent<game::LegacyId>(handle);
+    auto* legacy = world.GetComponent<ecs::LegacyIdComponent>(handle);
     if (legacy) {
-        state.id = legacy->id;
+        state.id = legacy->legacyId;
     }
 
     return state;
@@ -277,7 +284,6 @@ ByteBuffer SnapshotBuilder::BuildSnapshot(
     }
 
     if (!clientState) {
-        // Client not registered, send empty snapshot
         snapshot.WriteUInt32(0);
         return snapshot;
     }
@@ -294,86 +300,13 @@ ByteBuffer SnapshotBuilder::BuildSnapshot(
     }
 
     // Build delta snapshot
-    std::vector<uint8_t> entityData;
-    uint32_t deltaCount = 0;
-
-    for (uint32_t entityId : nearbyEntities) {
-        // Find entity in ECS
-        ecs::EntityHandle handle(entityId);
-        auto* transform = world.GetComponent<game::Transform>(handle);
-        if (!transform) continue;
-
-        // Check distance (Spatial Hash is approximate)
-        float dx = transform->x - clientX;
-        float dz = transform->z - clientZ;
-        float dist = std::sqrt(dx*dx + dz*dz);
-        if (dist > interestRadius) continue;
-
-        // Extract current state
-        EntityState currentState = ExtractEntityState(world, handle);
-
-        // Check if entity is new or changed
-        auto it = clientState->lastKnownState.find(entityId);
-        if (it == clientState->lastKnownState.end()) {
-            // New entity: send full state
-            SerializeEntityFull(snapshot, currentState);
-            deltaCount++;
-        } else {
-            // Existing entity: calculate delta
-            DeltaFlags delta = CalculateDelta(it->second, currentState);
-            if (delta != DeltaFlags::None) {
-                SerializeEntityDelta(snapshot, currentState, delta);
-                deltaCount++;
-            }
-        }
-
-        // Update known state
-        clientState->lastKnownState[entityId] = currentState;
-    }
-
-    // Remove entities that left AOI
-    std::vector<uint32_t> toRemove;
-    for (const auto& [id, state] : clientState->lastKnownState) {
-        if (std::find(nearbyEntities.begin(), nearbyEntities.end(), id) == nearbyEntities.end()) {
-            toRemove.push_back(id);
-        }
-    }
-    for (uint32_t id : toRemove) {
-        clientState->lastKnownState.erase(id);
-    }
-
-    // Write entity count at position 5 (after header)
-    // Note: In production, use a two-pass approach or reserve space
-    // For simplicity, we prepend count (less efficient but correct)
-    // Better approach: Write placeholder, seek back, write count
-
-    // Insert count at beginning of payload (after header bytes)
-    // Header: [type:1][timestamp:4] = 5 bytes
-    // Then: [count:4][entities...]
-
-    // Rebuild with proper count
-    ByteBuffer finalSnapshot;
-    finalSnapshot.WriteUInt8(0x01); // Delta snapshot
-    finalSnapshot.WriteFloat(static_cast<float>(
-        std::chrono::duration<float>(
-            std::chrono::steady_clock::now().time_since_epoch()).count()));
-    finalSnapshot.WriteUInt32(deltaCount);
-
-    // Copy entity data
-    // (In production, collect entity data first, then write count)
-    // For now, we write count first, then entities
-
-    // Actually, let's do it properly: collect first
-    // The above approach is conceptually correct but implementation needs care
-    // Here's the corrected version:
-
-    // Re-collect entities properly
-    std::vector<std::pair<EntityState, DeltaFlags>> deltaEntities;
     std::vector<EntityState> fullEntities;
+    std::vector<std::pair<EntityState, DeltaFlags>> deltaEntities;
+    std::vector<uint32_t> toRemove;
 
     for (uint32_t entityId : nearbyEntities) {
         ecs::EntityHandle handle(entityId);
-        auto* transform = world.GetComponent<game::Transform>(handle);
+        auto* transform = world.GetComponent<ecs::PositionComponent>(handle);
         if (!transform) continue;
 
         float dx = transform->x - clientX;
@@ -396,7 +329,7 @@ ByteBuffer SnapshotBuilder::BuildSnapshot(
         }
     }
 
-    // Clean up left entities
+    // Remove entities that left AOI
     for (const auto& [id, state] : clientState->lastKnownState) {
         if (std::find(nearbyEntities.begin(), nearbyEntities.end(), id) == nearbyEntities.end()) {
             toRemove.push_back(id);
@@ -406,16 +339,16 @@ ByteBuffer SnapshotBuilder::BuildSnapshot(
         clientState->lastKnownState.erase(id);
     }
 
-    // Write final snapshot
+    // Write final snapshot with proper count
     uint32_t totalEntities = static_cast<uint32_t>(fullEntities.size() + deltaEntities.size());
-    finalSnapshot.WriteUInt32(totalEntities);
+    snapshot.WriteUInt32(totalEntities);
 
     for (const auto& state : fullEntities) {
-        SerializeEntityFull(finalSnapshot, state);
+        SerializeEntityFull(snapshot, state);
     }
 
     for (const auto& [state, delta] : deltaEntities) {
-        SerializeEntityDelta(finalSnapshot, state, delta);
+        SerializeEntityDelta(snapshot, state, delta);
     }
 
     clientState->lastSnapshotTime = std::chrono::steady_clock::now();
@@ -423,7 +356,7 @@ ByteBuffer SnapshotBuilder::BuildSnapshot(
     AddLog("[Snapshot] Built delta snapshot for client {}: {} entities ({} full, {} delta)",
            clientSessionId, totalEntities, fullEntities.size(), deltaEntities.size());
 
-    return finalSnapshot;
+    return snapshot;
 }
 
 // =============================================================================
@@ -436,14 +369,11 @@ ByteBuffer SnapshotBuilder::BuildFullSnapshot(
     float interestRadius) {
 
     ByteBuffer snapshot;
-
-    // Header: Full snapshot
     snapshot.WriteUInt8(0x02); // Full snapshot type
     snapshot.WriteFloat(static_cast<float>(
         std::chrono::duration<float>(
             std::chrono::steady_clock::now().time_since_epoch()).count()));
 
-    // Get or create client state
     ClientState* clientState = nullptr;
     {
         std::lock_guard lock(clientStatesMutex);
@@ -455,10 +385,8 @@ ByteBuffer SnapshotBuilder::BuildFullSnapshot(
         clientState = &it->second;
     }
 
-    // Clear known state for full rebuild
     clientState->lastKnownState.clear();
 
-    // Query entities in AOI
     std::vector<uint32_t> nearbyEntities;
     {
         std::lock_guard lock(spatialMutex);
@@ -466,10 +394,11 @@ ByteBuffer SnapshotBuilder::BuildFullSnapshot(
     }
 
     uint32_t entityCount = 0;
+    std::vector<EntityState> allStates;
 
     for (uint32_t entityId : nearbyEntities) {
         ecs::EntityHandle handle(entityId);
-        auto* transform = world.GetComponent<game::Transform>(handle);
+        auto* transform = world.GetComponent<ecs::PositionComponent>(handle);
         if (!transform) continue;
 
         float dx = transform->x - clientX;
@@ -478,33 +407,14 @@ ByteBuffer SnapshotBuilder::BuildFullSnapshot(
         if (dist > interestRadius) continue;
 
         EntityState state = ExtractEntityState(world, handle);
-        SerializeEntityFull(snapshot, state);
+        allStates.push_back(state);
         clientState->lastKnownState[entityId] = state;
         entityCount++;
     }
 
-    // Insert count (need to rebuild with count first)
-    // For full snapshots, we write count after header
-    ByteBuffer finalSnapshot;
-    finalSnapshot.WriteUInt8(0x02);
-    finalSnapshot.WriteFloat(static_cast<float>(
-        std::chrono::duration<float>(
-            std::chrono::steady_clock::now().time_since_epoch()).count()));
-    finalSnapshot.WriteUInt32(entityCount);
-
-    // Re-serialize all entities
-    for (uint32_t entityId : nearbyEntities) {
-        ecs::EntityHandle handle(entityId);
-        auto* transform = world.GetComponent<game::Transform>(handle);
-        if (!transform) continue;
-
-        float dx = transform->x - clientX;
-        float dz = transform->z - clientZ;
-        float dist = std::sqrt(dx*dx + dz*dz);
-        if (dist > interestRadius) continue;
-
-        EntityState state = ExtractEntityState(world, handle);
-        SerializeEntityFull(finalSnapshot, state);
+    snapshot.WriteUInt32(entityCount);
+    for (const auto& state : allStates) {
+        SerializeEntityFull(snapshot, state);
     }
 
     clientState->lastSnapshotTime = std::chrono::steady_clock::now();
@@ -512,13 +422,11 @@ ByteBuffer SnapshotBuilder::BuildFullSnapshot(
     AddLog("[Snapshot] Built full snapshot for client {}: {} entities",
            clientSessionId, entityCount);
 
-    return finalSnapshot;
+    return snapshot;
 }
 
-} // namespace net
-
 // =============================================================================
-// FIX P5-1: Snapshot-Fragmentierung (MTU-Splitting)
+// FIX P2/P5-1: Snapshot-Fragmentierung (MTU-Splitting) — JETZT IN namespace net
 // =============================================================================
 std::vector<SnapshotFragment> SnapshotBuilder::FragmentSnapshot(
     const ByteBuffer& snapshotData,
@@ -528,7 +436,6 @@ std::vector<SnapshotFragment> SnapshotBuilder::FragmentSnapshot(
     const auto& data = snapshotData.data;
 
     if (data.size() <= MAX_FRAGMENT_PAYLOAD) {
-        // Passt in ein Paket
         SnapshotFragment frag;
         frag.sequenceId = sequenceId;
         frag.fragmentId = 0;
@@ -539,7 +446,6 @@ std::vector<SnapshotFragment> SnapshotBuilder::FragmentSnapshot(
         return fragments;
     }
 
-    // Fragmentieren
     size_t offset = 0;
     uint16_t fragId = 0;
     size_t totalFrags = (data.size() + MAX_FRAGMENT_PAYLOAD - 1) / MAX_FRAGMENT_PAYLOAD;
@@ -564,7 +470,7 @@ std::vector<SnapshotFragment> SnapshotBuilder::FragmentSnapshot(
 }
 
 bool SnapshotBuilder::SendFragmentedSnapshot(
-    net::NetworkServer& server,
+    NetworkServer& server,
     const ByteBuffer& snapshotData,
     uint32_t sequenceId,
     const std::string& ip,
@@ -581,25 +487,29 @@ bool SnapshotBuilder::SendFragmentedSnapshot(
         fragBuffer.WriteUInt32(static_cast<uint32_t>(frag.payload.size()));
         fragBuffer.data.insert(fragBuffer.data.end(), frag.payload.begin(), frag.payload.end());
 
-        bool sent = server.SendReliable(
-            PacketHeader{.protocolId = 0x4D4D, .flags = static_cast<uint8_t>(PacketFlags::Reliable)},
+        PacketHeader header{};
+        header.protocolId = 0x4D4D;
+        header.sequence = sequenceId;
+        header.flags = static_cast<uint16_t>(PacketFlags::Reliable);
+        if (fragments.size() > 1) {
+            header.flags |= static_cast<uint16_t>(PacketFlags::Fragmented);
+        }
+
+        server.SendReliable(
+            header,
             std::span(fragBuffer.data.data(), fragBuffer.data.size()),
             ip,
             port
         );
-
-        if (!sent) {
-            AddLog("[Snapshot] Fragment {}/{} konnte nicht gesendet werden",
-                   frag.fragmentId + 1, frag.totalFragments);
-            return false;
-        }
     }
 
     if (fragments.size() > 1) {
-        AddLog("[Snapshot] Snapshot {} in {} Fragmente aufgeteilt ({} Bytes → {} Bytes/Frag)",
+        AddLog("[Snapshot] Snapshot {} in {} Fragmente aufgeteilt ({} Bytes → ~{} Bytes/Frag)",
                sequenceId, fragments.size(), snapshotData.data.size(),
                snapshotData.data.size() / fragments.size());
     }
 
     return true;
 }
+
+} // namespace net
