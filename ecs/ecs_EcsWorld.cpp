@@ -185,3 +185,13 @@ void EcsWorld::MoveEntity(EntityHandle entity, Archetype* from, size_t fromIdx,
 }
 
 } // namespace ecs
+
+// =============================================================================
+// EXPLIZITE TEMPLATE-INSTANZIIERUNG (FIX: Verhindert Linker-Fehler)
+// =============================================================================
+template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::VelocityComponent>;
+template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::HealthComponent>;
+template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::HealthComponent, ecs::NameComponent>;
+template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::RenderComponent>;
+template class ecs::EcsWorld::Query<ecs::AIStateComponent>;
+template class ecs::EcsWorld::Query<ecs::CombatComponent>;

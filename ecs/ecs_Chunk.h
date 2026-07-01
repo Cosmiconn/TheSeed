@@ -34,7 +34,19 @@ public:
 
 private:
     ComponentMask componentMask;
-    std::unique_ptr<uint8_t[]> memory;
+    // FIX: Custom Deleter für aligned_alloc/_aligned_malloc
+    struct AlignedMemoryDeleter {
+        void operator()(uint8_t* ptr) const {
+            if (ptr) {
+#ifdef _WIN32
+                _aligned_free(ptr);
+#else
+                free(ptr);
+#endif
+            }
+        }
+    };
+    std::unique_ptr<uint8_t, AlignedMemoryDeleter> memory;
     size_t memorySize = 0;
     size_t entityCount = 0;
     size_t entityCapacity = 0;
@@ -91,9 +103,9 @@ public:
         memorySize = (currentOffset + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 
         #ifdef _WIN32
-        memory.reset(static_cast<uint8_t*>(_aligned_malloc(memorySize, ALIGNMENT)));
+        memory.reset(static_cast<uint8_t*>(_aligned_malloc(memorySize, ALIGNMENT)));  // FIX: AlignedMemoryDeleter ruft _aligned_free auf
         #else
-        memory.reset(static_cast<uint8_t*>(aligned_alloc(ALIGNMENT, memorySize)));
+        memory.reset(static_cast<uint8_t*>(aligned_alloc(ALIGNMENT, memorySize)));  // FIX: AlignedMemoryDeleter ruft free() auf
         #endif
 
         if (!memory) {

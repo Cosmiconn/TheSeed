@@ -17,6 +17,7 @@
 #include <functional>
 #include <string>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 
 namespace ecs {
@@ -35,6 +36,9 @@ public:
     };
 
 private:
+    // FIX P1-2: Component-Level Read-Write Locks
+    mutable std::shared_mutex componentMutex;
+
     EntityManager entityManager;
     std::vector<std::unique_ptr<Archetype>> archetypes;
     std::unordered_map<ComponentMask, Archetype*> archetypeMap;
@@ -120,6 +124,7 @@ private:
 
 template<typename T>
 void EcsWorld::AddComponent(EntityHandle entity, const T& component) {
+    std::unique_lock lock(componentMutex);  // FIX P1-2: Write-Lock
     auto record = entityManager.GetRecord(entity);
     if (!record.chunk) {
         AddLog("[ECS] Ungueltige Entity {} fuer AddComponent", entity);
@@ -155,6 +160,7 @@ void EcsWorld::AddComponent(EntityHandle entity, const T& component) {
 
 template<typename T>
 void EcsWorld::RemoveComponent(EntityHandle entity) {
+    std::unique_lock lock(componentMutex);  // FIX P1-2: Write-Lock
     auto record = entityManager.GetRecord(entity);
     if (!record.chunk) return;
 
@@ -180,6 +186,7 @@ void EcsWorld::RemoveComponent(EntityHandle entity) {
 
 template<typename T>
 T* EcsWorld::GetComponent(EntityHandle entity) {
+    std::shared_lock lock(componentMutex);  // FIX P1-2: Read-Lock
     auto record = entityManager.GetRecord(entity);
     if (!record.chunk) return nullptr;
     return record.chunk->GetComponent<T>(record.denseIndex);
@@ -194,6 +201,7 @@ bool EcsWorld::HasComponent(EntityHandle entity) const {
 
 template<typename... Components>
 Query<Components...> EcsWorld::QueryEntities() {
+    std::shared_lock lock(componentMutex);  // FIX P1-2: Read-Lock
     ComponentMask queryMask;
     (queryMask.Set(ComponentTraits<Components>::GetId()), ...);
 

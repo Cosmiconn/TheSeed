@@ -13,6 +13,7 @@
 #include <queue>
 #include <unordered_map>
 #include <mutex>
+#include <shared_mutex>
 
 namespace ecs {
 
@@ -33,7 +34,7 @@ class EntityManager {
 private:
     std::vector<EntityRecord> records;
     std::queue<EntityHandle> freeEntities;
-    std::mutex mutex;
+    mutable std::shared_mutex mutex;  // FIX: shared_mutex für read/write
     EntityHandle nextEntityId = 1;
 
 public:
@@ -47,7 +48,7 @@ public:
     // Entity Lifecycle
     // ===================================================================
     [[nodiscard]] EntityHandle CreateEntity() {
-        std::lock_guard lock(mutex);
+        std::unique_lock lock(mutex);
 
         EntityHandle entity;
         if (!freeEntities.empty()) {
@@ -72,7 +73,7 @@ public:
     }
 
     void DestroyEntity(EntityHandle entity) {
-        std::lock_guard lock(mutex);
+        std::unique_lock lock(mutex);
         if (entity >= records.size() || !records[entity].isAlive) return;
 
         records[entity].isAlive = false;
@@ -82,6 +83,7 @@ public:
     }
 
     [[nodiscard]] bool IsAlive(EntityHandle entity) const {
+        std::shared_lock lock(mutex);  // FIX: Read-Lock
         if (entity >= records.size()) return false;
         return records[entity].isAlive;
     }
@@ -90,25 +92,27 @@ public:
     // Record Management
     // ===================================================================
     void UpdateRecord(EntityHandle entity, Chunk* chunk, size_t denseIndex) {
-        std::lock_guard lock(mutex);
+        std::unique_lock lock(mutex);
         if (entity >= records.size()) return;
         records[entity].chunk = chunk;
         records[entity].denseIndex = denseIndex;
     }
 
     [[nodiscard]] EntityRecord GetRecord(EntityHandle entity) const {
+        std::shared_lock lock(mutex);  // FIX: Read-Lock für Thread-Sicherheit
         if (entity >= records.size()) return EntityRecord{};
         return records[entity];
     }
 
     void Clear() {
-        std::lock_guard lock(mutex);
+        std::unique_lock lock(mutex);
         records.clear();
         while (!freeEntities.empty()) freeEntities.pop();
         nextEntityId = 1;
     }
 
     [[nodiscard]] size_t GetAliveCount() const {
+        std::shared_lock lock(mutex);  // FIX: Read-Lock
         size_t count = 0;
         for (const auto& r : records) {
             if (r.isAlive) count++;
