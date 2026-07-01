@@ -1,8 +1,9 @@
 // =============================================================================
-// ecs/ecs_EcsWorld.cpp — EcsWorld Implementation (P4)
+// ecs/ecs_EcsWorld.cpp — EcsWorld Implementation (P4, AP-80)
 // =============================================================================
 // KORREKTUR P4: Chunk-Index korrekt berechnet. Performance-Metriken hinzugefuegt.
 // Archetype-Lookup mit Mutex geschuetzt. Entity-Count atomar.
+// KORREKTUR AP-80: Memory Profiler Integration fuer ECS-Speicher-Tracking.
 // =============================================================================
 #include "ecs_EcsWorld.h"
 #include "ecs_Chunk.h"
@@ -28,6 +29,8 @@ bool EcsWorld::Initialize() {
     ComponentTraits<CombatComponent>::Register(11);
 
     initialized = true;
+    lastProfileUpdate = std::chrono::steady_clock::now();
+
     AddLog("[ECS] EcsWorld initialisiert mit {} Komponenten", 12);
     return true;
 }
@@ -40,6 +43,10 @@ void EcsWorld::Shutdown() {
     entityManager.Clear();
     entityCount.store(0);
     initialized = false;
+
+    // AP-80: ECS-Speicher-Tracking zuruecksetzen
+    memory::TrackEcsChunkMemory(0, 0, 0, 0, 0, 0);
+
     AddLog("[ECS] EcsWorld heruntergefahren");
 }
 
@@ -59,6 +66,14 @@ EntityHandle EcsWorld::CreateEntity() {
     }
 
     entityCount.fetch_add(1);
+
+    // AP-80: Periodisches Speicher-Profiling
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<float>(now - lastProfileUpdate).count() >= 1.0f) {
+        UpdateMemoryProfile();
+        lastProfileUpdate = now;
+    }
+
     return entity;
 }
 
@@ -72,6 +87,13 @@ void EcsWorld::DestroyEntity(EntityHandle entity) {
 
     entityManager.DestroyEntity(entity);
     entityCount.fetch_sub(1);
+
+    // AP-80: Periodisches Speicher-Profiling
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<float>(now - lastProfileUpdate).count() >= 1.0f) {
+        UpdateMemoryProfile();
+        lastProfileUpdate = now;
+    }
 }
 
 bool EcsWorld::IsAlive(EntityHandle entity) const {
@@ -121,6 +143,13 @@ void EcsWorld::Update(float deltaTime) {
             sys.func(*this, deltaTime);
         }
     }
+
+    // AP-80: Periodisches Speicher-Profiling waehrend Update
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<float>(now - lastProfileUpdate).count() >= 5.0f) {
+        UpdateMemoryProfile();
+        lastProfileUpdate = now;
+    }
 }
 
 // =============================================================================
@@ -139,14 +168,36 @@ size_t EcsWorld::GetTotalMemoryUsage() const {
     std::lock_guard lock(archetypeMutex);
     size_t bytes = 0;
     for (const auto& archetype : archetypes) {
-        for (size_t i = 0; i < archetype->GetChunkCount(); ++i) {
-            auto* chunk = archetype->GetChunk(i);
-            if (chunk) {
-                bytes += chunk->GetMemorySize();
-            }
-        }
+        bytes += archetype->GetMemoryUsage();
     }
     return bytes;
+}
+
+// =============================================================================
+// AP-80: Memory Profiler Update
+// =============================================================================
+void EcsWorld::UpdateMemoryProfile() {
+    size_t totalMemory = GetTotalMemoryUsage();
+    size_t chunkCount = GetTotalChunkCount();
+    size_t archetypeCount = GetArchetypeCount();
+    size_t entityCount = this->GetEntityCount();
+
+    // Berechne genutzten Speicher (Entities * durchschnittliche Komponenten-Groesse)
+    // Vereinfacht: Annahme ~200 Bytes pro Entity durchschnittlich
+    size_t usedMemory = entityCount * 200;
+    if (usedMemory > totalMemory) usedMemory = totalMemory;
+
+    memory::TrackEcsChunkMemory(
+        totalMemory,
+        usedMemory,
+        entityCount,
+        chunkCount,
+        archetypeCount,
+        12 // Komponenten-Typen
+    );
+
+    // AP-80: Snapshot aufzeichnen
+    memory::MemoryProfiler::GetInstance().RecordSnapshot();
 }
 
 // =============================================================================
@@ -189,9 +240,9 @@ void EcsWorld::MoveEntity(EntityHandle entity, Archetype* from, size_t fromIdx,
 // =============================================================================
 // EXPLIZITE TEMPLATE-INSTANZIIERUNG (FIX: Verhindert Linker-Fehler)
 // =============================================================================
+template class ecs::EcsWorld::Query<ecs::PositionComponent>;
 template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::VelocityComponent>;
 template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::HealthComponent>;
-template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::HealthComponent, ecs::NameComponent>;
-template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::RenderComponent>;
-template class ecs::EcsWorld::Query<ecs::AIStateComponent>;
-template class ecs::EcsWorld::Query<ecs::CombatComponent>;
+template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::VelocityComponent, ecs::HealthComponent>;
+template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::NameComponent>;
+template class ecs::EcsWorld::Query<ecs::PositionComponent, ecs::VelocityComponent, ecs::HealthComponent, ecs::NameComponent>;

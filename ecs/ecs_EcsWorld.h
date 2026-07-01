@@ -1,9 +1,10 @@
 #pragma once
 // =============================================================================
-// ecs/ecs_EcsWorld.h — Haupt-ECS-Interface (AP-20, P4)
+// ecs/ecs_EcsWorld.h — Haupt-ECS-Interface (AP-20, P4, AP-80)
 // =============================================================================
-// KORREKTUR P4: Chunk-Index wird korrekt berechnet. System-Getter hinzugefügt.
+// KORREKTUR P4: Chunk-Index wird korrekt berechnet. System-Getter hinzugefuegt.
 // Archetype-Lookup optimiert mit unordered_map. Entity-Count gecached.
+// KORREKTUR AP-80: Memory Profiler Integration fuer ECS-Speicher-Tracking.
 // =============================================================================
 #include "ecs_Types.h"
 #include "ecs_Archetype.h"
@@ -11,13 +12,14 @@
 #include "ecs_EntityManager.h"
 #include "Components.h"
 #include "../core/Log.h"
+#include "../memory/MemoryProfilerIntegration.h"
 
+#include <functional>
 #include <vector>
 #include <unordered_map>
-#include <functional>
 #include <string>
+#include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <atomic>
 
 namespace ecs {
@@ -46,6 +48,9 @@ private:
     std::atomic<size_t> entityCount{0};
     std::mutex archetypeMutex;
     bool initialized = false;
+
+    // AP-80: Profiling-Timer fuer periodisches ECS-Tracking
+    std::chrono::steady_clock::time_point lastProfileUpdate;
 
 public:
     EcsWorld() = default;
@@ -111,6 +116,9 @@ public:
     [[nodiscard]] size_t GetTotalChunkCount() const;
     [[nodiscard]] size_t GetTotalMemoryUsage() const;
 
+    // AP-80: Profiling-Update
+    void UpdateMemoryProfile();
+
 private:
     [[nodiscard]] Archetype* FindOrCreateArchetype(const ComponentMask& mask);
     [[nodiscard]] std::pair<Archetype*, size_t> FindEntityLocation(EntityHandle entity) const;
@@ -124,7 +132,7 @@ private:
 
 template<typename T>
 void EcsWorld::AddComponent(EntityHandle entity, const T& component) {
-    std::unique_lock lock(componentMutex);  // FIX P1-2: Write-Lock
+    std::unique_lock lock(componentMutex); // FIX P1-2: Write-Lock
     auto record = entityManager.GetRecord(entity);
     if (!record.chunk) {
         AddLog("[ECS] Ungueltige Entity {} fuer AddComponent", entity);
@@ -136,7 +144,7 @@ void EcsWorld::AddComponent(EntityHandle entity, const T& component) {
 
     Archetype* newArchetype = FindOrCreateArchetype(newMask);
     if (newArchetype == record.chunk->GetArchetype()) {
-        record.chunk->SetComponent(record.denseIndex, component);
+        record.chunk->SetComponent<T>(record.denseIndex, component);
         return;
     }
 
@@ -145,7 +153,7 @@ void EcsWorld::AddComponent(EntityHandle entity, const T& component) {
     auto [newChunk, newDenseIdx] = newArchetype->FindEntity(entity);
     if (newChunk) {
         newChunk->TransferComponents(*record.chunk, record.denseIndex, newDenseIdx);
-        newChunk->SetComponent(newDenseIdx, component);
+        newChunk->SetComponent<T>(newDenseIdx, component);
     }
 
     // Alten Eintrag entfernen
@@ -156,11 +164,14 @@ void EcsWorld::AddComponent(EntityHandle entity, const T& component) {
     if (updatedChunk) {
         entityManager.UpdateRecord(entity, updatedChunk, updatedIdx);
     }
+
+    // AP-80: Speicher-Profil aktualisieren
+    UpdateMemoryProfile();
 }
 
 template<typename T>
 void EcsWorld::RemoveComponent(EntityHandle entity) {
-    std::unique_lock lock(componentMutex);  // FIX P1-2: Write-Lock
+    std::unique_lock lock(componentMutex); // FIX P1-2: Write-Lock
     auto record = entityManager.GetRecord(entity);
     if (!record.chunk) return;
 
@@ -182,11 +193,14 @@ void EcsWorld::RemoveComponent(EntityHandle entity) {
     if (updatedChunk) {
         entityManager.UpdateRecord(entity, updatedChunk, updatedIdx);
     }
+
+    // AP-80: Speicher-Profil aktualisieren
+    UpdateMemoryProfile();
 }
 
 template<typename T>
 T* EcsWorld::GetComponent(EntityHandle entity) {
-    std::shared_lock lock(componentMutex);  // FIX P1-2: Read-Lock
+    std::shared_lock lock(componentMutex); // FIX P1-2: Read-Lock
     auto record = entityManager.GetRecord(entity);
     if (!record.chunk) return nullptr;
     return record.chunk->GetComponent<T>(record.denseIndex);
@@ -201,14 +215,14 @@ bool EcsWorld::HasComponent(EntityHandle entity) const {
 
 template<typename... Components>
 Query<Components...> EcsWorld::QueryEntities() {
-    std::shared_lock lock(componentMutex);  // FIX P1-2: Read-Lock
+    std::shared_lock lock(componentMutex); // FIX P1-2: Read-Lock
     ComponentMask queryMask;
     (queryMask.Set(ComponentTraits<Components>::GetId()), ...);
 
     std::vector<Chunk*> matchingChunks;
     matchingChunks.reserve(archetypes.size() * 2); // P4: Reserve
 
-    std::lock_guard lock(archetypeMutex);
+    std::lock_guard lockArchetype(archetypeMutex);
     for (const auto& archetype : archetypes) {
         if (archetype->Matches(queryMask)) {
             for (size_t i = 0; i < archetype->GetChunkCount(); ++i) {
