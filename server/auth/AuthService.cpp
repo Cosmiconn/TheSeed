@@ -1,27 +1,31 @@
 // =============================================================================
-// server/auth/AuthService.cpp — JWT + Argon2id Implementation (AP-45 Fix)
+// server/auth/AuthService.cpp — JWT + Argon2id Implementation (P3-FIX)
 // =============================================================================
-// KORREKTUR: Hartkodierte Credentials ("test"/"test") entfernt.
-// AuthService nutzt jetzt IUserRepository für echte DB-Abfragen.
-// Login prüft gegen Argon2id-Hashes in der Datenbank.
+// KORREKTUR P3:
+// • Alle fehlenden Includes ergänzt (<nlohmann/json.hpp>, <openssl/hmac.h>)
+// • Fallback-Hashing ohne libsodium (PBKDF2-ähnlich)
+// • Argon2IdVerify korrigiert (Rückgabetyp bool statt std::string)
+// • libsodium-Initialisierung mit Fehlerbehandlung
 // =============================================================================
 #include "AuthService.h"
 #include "../../core/Log.h"
 
-#include <sodium.h>
+#include <nlohmann/json.hpp>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
-#include <nlohmann/json.hpp>
-#include <format>
-#include <algorithm>
+
+#include <random>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <cstring>
 
 namespace auth {
 
 using json = nlohmann::json;
 
-
 // =============================================================================
-// FIX P3: Fallback Hashing (wenn libsodium nicht verfügbar)
+// FALLBACK HASHING (wenn libsodium nicht verfügbar)
 // =============================================================================
 #ifndef HAS_LIBSODIUM
 static std::string GenerateSalt() {
@@ -51,16 +55,41 @@ static std::string HashWithSalt(std::string_view password, std::string_view salt
     return oss.str();
 }
 
-static std::string Argon2IdVerify(std::string_view password, std::string_view hashString) {
-    // Parse $seed$ format
+static bool Argon2IdVerifyFallback(std::string_view password, std::string_view hashString) {
+    // Parse $seed$ format: $seed$v=1$iter=<salt>$<hash>
     if (!hashString.starts_with("$seed$")) return false;
-    // Simplified: re-hash with stored salt and compare
-    return false; // Placeholder - full implementation in GameSystems.cpp
+
+    std::string_view remaining = hashString;
+    remaining.remove_prefix(6); // Skip "$seed$"
+
+    if (!remaining.starts_with("v=1$iter=")) return false;
+    remaining.remove_prefix(9); // Skip "v=1$iter="
+
+    size_t dollarPos = remaining.find('$');
+    if (dollarPos == std::string_view::npos) return false;
+    int iterations = std::stoi(std::string(remaining.substr(0, dollarPos)));
+    remaining.remove_prefix(dollarPos + 1);
+
+    dollarPos = remaining.find('$');
+    if (dollarPos == std::string_view::npos) return false;
+    std::string_view salt = remaining.substr(0, dollarPos);
+    remaining.remove_prefix(dollarPos + 1);
+
+    std::string_view storedHash = remaining;
+    std::string computedHash = HashWithSalt(password, salt, iterations);
+
+    // Konstante Zeit-Vergleich (Timing-Attack-Schutz)
+    if (computedHash.size() != storedHash.size()) return false;
+    bool match = true;
+    for (size_t i = 0; i < computedHash.size(); ++i) {
+        match &= (computedHash[i] == storedHash[i]);
+    }
+    return match;
 }
 #endif
 
 // =============================================================================
-// Base64 Helpers (RFC 4648)
+// BASE64 HILFSFUNKTIONEN (RFC 4648)
 // =============================================================================
 static constexpr std::string_view BASE64_CHARS =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -105,15 +134,15 @@ static std::vector<uint8_t> Base64Decode(std::string_view str) {
 
         uint32_t triple = (sextet_a << 18) | (sextet_b << 12) | (sextet_c << 6) | sextet_d;
 
-        if (str[i + 2] != '=') decoded.push_back((triple >> 16) & 0xFF);
-        if (str[i + 2] != '=') decoded.push_back((triple >> 8) & 0xFF);
-        if (str[i + 3] != '=') decoded.push_back(triple & 0xFF);
+        if (str[i + 2] != '=') decoded.push_back(static_cast<uint8_t>((triple >> 16) & 0xFF));
+        if (str[i + 2] != '=') decoded.push_back(static_cast<uint8_t>((triple >> 8) & 0xFF));
+        if (str[i + 3] != '=') decoded.push_back(static_cast<uint8_t>(triple & 0xFF));
     }
     return decoded;
 }
 
 // =============================================================================
-// JWT Helpers
+// JWT HILFSFUNKTIONEN
 // =============================================================================
 static std::string CreateJWTHeader() {
     json header = {{"alg", "HS256"}, {"typ", "JWT"}};
@@ -134,30 +163,44 @@ static std::string SignHMAC256(std::string_view message, std::span<const uint8_t
 }
 
 // =============================================================================
-// AuthService Implementation
+// AUTHSERVICE IMPLEMENTATION
 // =============================================================================
 AuthService::AuthService(std::unique_ptr<IUserRepository> repo, const AuthConfig& cfg)
     : config(cfg), userRepo(std::move(repo)) {
 
     if (!userRepo || !userRepo->IsHealthy()) {
-        AddLog("[Auth] CRITICAL: UserRepository not available!");
+        AddLog("[Auth] KRITISCH: UserRepository nicht verfügbar!");
     }
 
+#ifdef HAS_LIBSODIUM
     if (sodium_init() < 0) {
-        AddLog("[Auth] CRITICAL: libsodium initialization failed!");
+        AddLog("[Auth] KRITISCH: libsodium Initialisierung fehlgeschlagen!");
+    } else {
+        AddLog("[Auth] libsodium initialisiert.");
     }
 
-    // Generate random JWT secret (32 bytes)
-    // PRODUCTION: Load from secure key storage (HSM, AWS KMS, HashiCorp Vault)
+    // Zufälliger JWT-Secret (32 Bytes)
     jwtSecret.resize(32);
     randombytes_buf(jwtSecret.data(), jwtSecret.size());
+#else
+    AddLog("[Auth] WARNUNG: libsodium nicht verfügbar, verwende Fallback-Hashing.");
 
-    AddLog("[Auth] AuthService initialized with Argon2id (t={}, m={}, p={})",
+    // Fallback: Zufälliger JWT-Secret ohne libsodium
+    jwtSecret.resize(32);
+    std::random_device rd;
+    std::mt19937_64 rng(rd());
+    std::uniform_int_distribution<uint8_t> dist(0, 255);
+    for (auto& byte : jwtSecret) {
+        byte = dist(rng);
+    }
+#endif
+
+    AddLog("[Auth] AuthService initialisiert (Argon2id: t={}, m={}, p={})",
            config.argon2Iterations, config.argon2Memory, config.argon2Parallelism);
 }
 
 // =============================================================================
-// Password Hashing (Argon2id)
+// PASSWORT-HASHING (Argon2id)
 // =============================================================================
 std::vector<uint8_t> AuthService::HashPassword(std::string_view password) {
 #ifdef HAS_LIBSODIUM
@@ -173,26 +216,29 @@ std::vector<uint8_t> AuthService::HashPassword(std::string_view password) {
     );
 
     if (result != 0) {
-        AddLog("[Auth] Argon2id hashing failed (out of memory?)");
+        AddLog("[Auth] Argon2id Hashing fehlgeschlagen (Speicher?)");
         return {};
     }
 
     return hash;
 #else
-    // FIX P3: Fallback ohne libsodium - PBKDF2-ähnlich mit std::hash
-    AddLog("[Auth] WARNING: libsodium not available, using fallback hashing");
+    // FIX P3: Fallback ohne libsodium - PBKDF2-ähnlich
+    AddLog("[Auth] WARNUNG: libsodium nicht verfügbar, verwende Fallback-Hashing");
     std::string salt = GenerateSalt();
     constexpr int ITERATIONS = 100000;
     std::string hashStr = HashWithSalt(password, salt, ITERATIONS);
+
+    // Format: $seed$v=1$iter=<iter>$<salt>$<hash>
+    std::string formatted = std::format("$seed$v=1$iter={}${}${}", ITERATIONS, salt, hashStr);
     std::vector<uint8_t> result;
-    result.insert(result.end(), hashStr.begin(), hashStr.end());
+    result.insert(result.end(), formatted.begin(), formatted.end());
     return result;
 #endif
 }
 
 bool AuthService::VerifyPassword(std::string_view password, std::span<const uint8_t> hash) {
 #ifdef HAS_LIBSODIUM
-    if (hash.empty() || hash.size() < crypto_pwhash_STRBYTES) {
+    if (hash.empty()) {
         return false;
     }
 
@@ -205,14 +251,14 @@ bool AuthService::VerifyPassword(std::string_view password, std::span<const uint
     return result == 0;
 #else
     // FIX P3: Fallback - parse $seed$ format and verify
-    AddLog("[Auth] WARNING: libsodium not available, using fallback verification");
+    AddLog("[Auth] WARNUNG: libsodium nicht verfügbar, verwende Fallback-Verifikation");
     std::string hashStr(hash.begin(), hash.end());
-    return Argon2IdVerify(password, hashStr);
+    return Argon2IdVerifyFallback(password, hashStr);
 #endif
 }
 
 // =============================================================================
-// Registration
+// REGISTRIERUNG
 // =============================================================================
 std::expected<void, AuthError> AuthService::Register(
     std::string_view username,
@@ -223,7 +269,7 @@ std::expected<void, AuthError> AuthService::Register(
         return std::unexpected(AuthError::RepositoryUnavailable);
     }
 
-    // Validate input
+    // Eingabe validieren
     if (username.empty() || username.length() < 3 || username.length() > 32) {
         return std::unexpected(AuthError::InvalidCredentials);
     }
@@ -231,22 +277,22 @@ std::expected<void, AuthError> AuthService::Register(
         return std::unexpected(AuthError::InvalidCredentials);
     }
 
-    // Check if user already exists
+    // Prüfe ob Benutzer bereits existiert
     auto exists = userRepo->UserExists(username);
     if (!exists) {
         return std::unexpected(AuthError::InternalError);
     }
     if (*exists) {
-        return std::unexpected(AuthError::InvalidCredentials); // Don't leak existence
+        return std::unexpected(AuthError::InvalidCredentials); // Existenz nicht preisgeben
     }
 
-    // Hash password
+    // Passwort hashen
     auto hash = HashPassword(password);
     if (hash.empty()) {
         return std::unexpected(AuthError::InternalError);
     }
 
-    // Create user record
+    // Benutzer erstellen
     UserRecord record;
     record.username = std::string(username);
     record.passwordHash = std::move(hash);
@@ -261,12 +307,12 @@ std::expected<void, AuthError> AuthService::Register(
         return std::unexpected(AuthError::InternalError);
     }
 
-    AddLog("[Auth] New user registered: {}", username);
+    AddLog("[Auth] Neuer Benutzer registriert: {}", username);
     return {};
 }
 
 // =============================================================================
-// Login — KORREKTUR: Keine hartkodierten Credentials mehr!
+// LOGIN — KORREKTUR: Keine hartkodierten Credentials!
 // =============================================================================
 std::expected<Token, AuthError> AuthService::Login(
     std::string_view username,
@@ -277,12 +323,12 @@ std::expected<Token, AuthError> AuthService::Login(
         return std::unexpected(AuthError::RepositoryUnavailable);
     }
 
-    // Rate limit check (IP-based)
+    // Rate Limit prüfen (IP-basiert)
     if (IsRateLimited(clientIP)) {
         return std::unexpected(AuthError::RateLimited);
     }
 
-    // Fetch user from database
+    // Benutzer aus Datenbank laden
     auto userResult = userRepo->FindByUsername(username);
     if (!userResult) {
         if (userResult.error() == RepositoryError::UserNotFound) {
@@ -294,28 +340,28 @@ std::expected<Token, AuthError> AuthService::Login(
 
     const auto& user = *userResult;
 
-    // Check if account is banned
+    // Prüfe ob Account gesperrt
     if (user.isBanned) {
         return std::unexpected(AuthError::AccountBanned);
     }
 
-    // Check account-level lockout
+    // Account-Level Lockout prüfen
     if (user.failedLoginAttempts >= config.maxFailedAttempts) {
         auto now = std::chrono::system_clock::now();
         if (now < user.lockedUntil) {
             return std::unexpected(AuthError::AccountLocked);
         }
-        // Lock expired, reset attempts
+        // Lock abgelaufen, Versuche zurücksetzen
         userRepo->UpdateLoginAttempts(username, 0, std::chrono::system_clock::time_point{});
     }
 
-    // Verify password with Argon2id
+    // Passwort mit Argon2id verifizieren
     bool passwordValid = VerifyPassword(password, user.passwordHash);
 
     if (!passwordValid) {
         RecordAttempt(clientIP, false);
 
-        // Increment failed attempts in DB
+        // Fehlversuche in DB inkrementieren
         uint32_t newAttempts = user.failedLoginAttempts + 1;
         auto lockUntil = newAttempts >= config.maxFailedAttempts
             ? std::chrono::system_clock::now() + config.accountLockoutDuration
@@ -326,24 +372,24 @@ std::expected<Token, AuthError> AuthService::Login(
         return std::unexpected(AuthError::InvalidCredentials);
     }
 
-    // Success: reset failed attempts and update last login
+    // Erfolg: Fehlversuche zurücksetzen und letzten Login aktualisieren
     RecordAttempt(clientIP, true);
     userRepo->UpdateLastLogin(username, clientIP);
     userRepo->UpdateLoginAttempts(username, 0, std::chrono::system_clock::time_point{});
 
-    // Generate tokens
+    // Tokens generieren
     Token token;
     token.accessToken = GenerateJWT(username, config.accessTokenLifetime);
     token.refreshToken = GenerateJWT(std::string(username) + ":refresh", config.refreshTokenLifetime);
     token.accessExpiry = std::chrono::steady_clock::now() + config.accessTokenLifetime;
     token.refreshExpiry = std::chrono::steady_clock::now() + config.refreshTokenLifetime;
 
-    AddLog("[Auth] User '{}' logged in from {}", username, clientIP);
+    AddLog("[Auth] Benutzer '{}' eingeloggt von {}", username, clientIP);
     return token;
 }
 
 // =============================================================================
-// Refresh Token
+// TOKEN ERNEUERN
 // =============================================================================
 std::expected<Token, AuthError> AuthService::RefreshToken(std::string_view refreshToken) {
     std::string username;
@@ -351,14 +397,14 @@ std::expected<Token, AuthError> AuthService::RefreshToken(std::string_view refre
         return std::unexpected(AuthError::TokenInvalid);
     }
 
-    // Verify it's a refresh token
+    // Prüfe ob es ein Refresh-Token ist
     if (!username.ends_with(":refresh")) {
         return std::unexpected(AuthError::TokenInvalid);
     }
 
     username = username.substr(0, username.find(":refresh"));
 
-    // Verify user still exists and is active
+    // Prüfe ob Benutzer noch existiert und aktiv ist
     if (!userRepo || !userRepo->IsHealthy()) {
         return std::unexpected(AuthError::RepositoryUnavailable);
     }
@@ -378,7 +424,7 @@ std::expected<Token, AuthError> AuthService::RefreshToken(std::string_view refre
 }
 
 // =============================================================================
-// Token Verification
+// TOKEN VERIFIZIERUNG
 // =============================================================================
 bool AuthService::VerifyToken(std::string_view accessToken) {
     std::string username;
@@ -394,7 +440,7 @@ std::optional<std::string> AuthService::ExtractUsername(std::string_view accessT
 }
 
 // =============================================================================
-// Password Change
+// PASSWORT ÄNDERN
 // =============================================================================
 std::expected<void, AuthError> AuthService::ChangePassword(
     std::string_view username,
@@ -414,12 +460,12 @@ std::expected<void, AuthError> AuthService::ChangePassword(
         return std::unexpected(AuthError::AccountNotFound);
     }
 
-    // Verify old password
+    // Altes Passwort verifizieren
     if (!VerifyPassword(oldPassword, userResult->passwordHash)) {
         return std::unexpected(AuthError::InvalidCredentials);
     }
 
-    // Hash new password
+    // Neues Passwort hashen
     auto newHash = HashPassword(newPassword);
     if (newHash.empty()) {
         return std::unexpected(AuthError::InternalError);
@@ -430,13 +476,12 @@ std::expected<void, AuthError> AuthService::ChangePassword(
         return std::unexpected(AuthError::InternalError);
     }
 
-    AddLog("[Auth] Password changed for user: {}", username);
+    AddLog("[Auth] Passwort geändert für: {}", username);
     return {};
 }
 
 // =============================================================================
-// Rate Limiting (IP-based, in-memory)
-// PRODUCTION: Replace with Redis-backed rate limiting
+// RATE LIMITING (IP-basiert, in-memory)
 // =============================================================================
 bool AuthService::IsRateLimited(std::string_view clientIP) {
     std::lock_guard lock(rateLimitMutex);
@@ -478,13 +523,13 @@ void AuthService::RecordAttempt(std::string_view clientIP, bool success) {
     if (entry.attemptCount >= config.maxAttemptsPerMinute) {
         entry.isLocked = true;
         entry.lockedUntil = now + config.lockoutDuration;
-        AddLog("[Auth] Rate limit triggered for IP {} (locked for {} min)",
+        AddLog("[Auth] Rate Limit ausgelöst für IP {} (gesperrt für {} min)",
                clientIP, config.lockoutDuration.count());
     }
 }
 
 // =============================================================================
-// JWT Generation & Validation
+// JWT GENERIERUNG & VALIDIERUNG
 // =============================================================================
 std::string AuthService::GenerateJWT(std::string_view username, std::chrono::minutes lifetime) {
     std::string header = CreateJWTHeader();
@@ -496,7 +541,7 @@ std::string AuthService::GenerateJWT(std::string_view username, std::chrono::min
         {"sub", std::string(username)},
         {"iat", std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count()},
         {"exp", std::chrono::duration_cast<std::chrono::seconds>(expiry.time_since_epoch()).count()},
-        {"jti", std::format("{}", randombytes_random())}
+        {"jti", std::format("{}", std::random_device{}())}
     };
 
     std::string payloadStr = payload.dump();
@@ -510,7 +555,7 @@ std::string AuthService::GenerateJWT(std::string_view username, std::chrono::min
 }
 
 bool AuthService::ValidateJWT(std::string_view token, std::string& outUsername) {
-    // Split token
+    // Token splitten
     size_t firstDot = token.find('.');
     size_t secondDot = token.find('.', firstDot + 1);
 
@@ -522,7 +567,7 @@ bool AuthService::ValidateJWT(std::string_view token, std::string& outUsername) 
     std::string_view payloadB64 = token.substr(firstDot + 1, secondDot - firstDot - 1);
     std::string_view signature = token.substr(secondDot + 1);
 
-    // Verify signature
+    // Signatur verifizieren
     std::string toSign = std::string(headerB64) + "." + std::string(payloadB64);
     std::string expectedSig = SignHMAC256(toSign, jwtSecret);
 
@@ -530,14 +575,14 @@ bool AuthService::ValidateJWT(std::string_view token, std::string& outUsername) 
         return false;
     }
 
-    // Decode payload
+    // Payload dekodieren
     auto payloadBytes = Base64Decode(std::string(payloadB64));
     std::string payloadStr(payloadBytes.begin(), payloadBytes.end());
 
     try {
         json payload = json::parse(payloadStr);
 
-        // Check expiry
+        // Ablauf prüfen
         if (payload.contains("exp")) {
             auto now = std::chrono::system_clock::now();
             auto exp = std::chrono::seconds(payload["exp"].get<int64_t>());
@@ -557,7 +602,7 @@ void AuthService::CleanupRateLimits() {
     auto now = std::chrono::steady_clock::now();
     std::erase_if(rateLimitMap, [&now](const auto& pair) {
         const auto& entry = pair.second;
-        // Remove entries older than 1 hour with no activity
+        // Entferne Einträge älter als 1 Stunde ohne Aktivität
         return !entry.isLocked &&
                std::chrono::duration_cast<std::chrono::hours>(now - entry.firstAttempt).count() > 1;
     });

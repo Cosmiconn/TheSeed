@@ -1,25 +1,41 @@
-// =============================================================================
-// server/auth/AuthService.h — JWT + Argon2id Authentication (AP-45)
-// Dependencies: libsodium (vcpkg)
-// =============================================================================
-// KORREKTUR (AP-45 Fix): Hartkodierte Credentials entfernt.
-// AuthService nutzt jetzt IUserRepository für DB-Zugriff.
-// Keine hartkodierten Test-Credentials mehr.
-// =============================================================================
 #pragma once
+// =============================================================================
+// server/auth/AuthService.h — JWT + Argon2id Authentication (P3-FIX)
+// =============================================================================
+// KORREKTUR P3: Alle fehlenden Includes ergänzt.
+// libsodium und OpenSSL als optionale Abhängigkeiten.
+// =============================================================================
 #include "IUserRepository.h"
+
 #include <string>
-#include <string_view>
 #include <vector>
-#include <span>
+#include <memory>
 #include <optional>
 #include <expected>
+#include <chrono>
 #include <unordered_map>
 #include <mutex>
-#include <chrono>
+#include <span>
+#include <format>
+#include <sstream>
+#include <random>
+#include <algorithm>
+
+// Optionale Abhängigkeiten
+#ifdef HAS_LIBSODIUM
+#include <sodium.h>
+#endif
+
+#ifdef HAS_OPENSSL
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
+#endif
 
 namespace auth {
 
+// =============================================================================
+// AUTH-FEHLER
+// =============================================================================
 enum class AuthError {
     InvalidCredentials,
     AccountNotFound,
@@ -32,6 +48,9 @@ enum class AuthError {
     RepositoryUnavailable
 };
 
+// =============================================================================
+// TOKEN
+// =============================================================================
 struct Token {
     std::string accessToken;
     std::string refreshToken;
@@ -39,33 +58,36 @@ struct Token {
     std::chrono::steady_clock::time_point refreshExpiry;
 };
 
+// =============================================================================
+// AUTH-KONFIGURATION
+// =============================================================================
 struct AuthConfig {
-    // Argon2id parameters (OWASP recommended minimum)
+    // Argon2id Parameter (OWASP Minimum)
     uint32_t argon2Iterations = 3;      // t_cost
     uint32_t argon2Memory = 65536;      // m_cost (64MB)
     uint32_t argon2Parallelism = 4;     // threads
 
-    // JWT settings
+    // JWT-Einstellungen
     std::chrono::minutes accessTokenLifetime{15};
     std::chrono::days refreshTokenLifetime{7};
 
-    // Rate limiting (in-memory; production: Redis)
+    // Rate Limiting (in-memory; Produktion: Redis)
     uint32_t maxAttemptsPerMinute = 5;
     std::chrono::minutes lockoutDuration{15};
 
-    // Account lockout
-    uint32_t maxFailedAttempts = 10;    // Before account-level lock
+    // Account-Lockout
+    uint32_t maxFailedAttempts = 10;
     std::chrono::minutes accountLockoutDuration{60};
 };
 
 // =============================================================================
-// AuthService — Production-Ready Authentication
+// AUTHSERVICE — Produktionsreife Authentifizierung
 // =============================================================================
 class AuthService {
     AuthConfig config;
-    std::unique_ptr<IUserRepository> userRepo;  // Dependency Injection
+    std::unique_ptr<IUserRepository> userRepo; // Dependency Injection
 
-    // Rate limiting state (in production: replace with Redis)
+    // Rate Limiting Zustand (in Produktion: Redis ersetzen)
     struct RateLimitEntry {
         uint32_t attemptCount = 0;
         std::chrono::steady_clock::time_point firstAttempt;
@@ -75,12 +97,12 @@ class AuthService {
     std::unordered_map<std::string, RateLimitEntry> rateLimitMap;
     std::mutex rateLimitMutex;
 
-    // JWT signing key (in production: load from secure key storage / HSM)
+    // JWT Signing-Key (in Produktion: HSM / Vault)
     std::vector<uint8_t> jwtSecret;
 
 public:
     // ===================================================================
-    // Construction: Repository wird injected (SQLite, PostgreSQL, Mock)
+    // Konstruktion: Repository wird injected (SQLite, PostgreSQL, Mock)
     // ===================================================================
     explicit AuthService(std::unique_ptr<IUserRepository> repo,
                          const AuthConfig& cfg = AuthConfig{});
@@ -90,13 +112,13 @@ public:
     AuthService& operator=(const AuthService&) = delete;
 
     // ===================================================================
-    // Password Hashing (Argon2id via libsodium)
+    // Passwort-Hashing (Argon2id via libsodium)
     // ===================================================================
     [[nodiscard]] std::vector<uint8_t> HashPassword(std::string_view password);
     [[nodiscard]] bool VerifyPassword(std::string_view password, std::span<const uint8_t> hash);
 
     // ===================================================================
-    // Registration
+    // Registrierung
     // ===================================================================
     [[nodiscard]] std::expected<void, AuthError> Register(
         std::string_view username,
@@ -104,7 +126,7 @@ public:
         std::string_view email = "");
 
     // ===================================================================
-    // Authentication
+    // Authentifizierung
     // ===================================================================
     [[nodiscard]] std::expected<Token, AuthError> Login(
         std::string_view username,
@@ -116,12 +138,12 @@ public:
     [[nodiscard]] std::optional<std::string> ExtractUsername(std::string_view accessToken);
 
     // ===================================================================
-    // Account Management
+    // Account-Management
     // ===================================================================
     [[nodiscard]] bool IsRateLimited(std::string_view clientIP);
     void RecordAttempt(std::string_view clientIP, bool success);
 
-    // Force password change (admin operation)
+    // Passwort ändern (Admin-Operation)
     [[nodiscard]] std::expected<void, AuthError> ChangePassword(
         std::string_view username,
         std::string_view oldPassword,
