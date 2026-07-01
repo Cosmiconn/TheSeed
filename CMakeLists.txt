@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
 # =============================================================================
-# TheSeed Engine — CMake Build Configuration (V13.2 FIXED)
-# All missing source files added.
+# TheSeed Engine — CMake Build Configuration (V13.2 P3-FIX)
 # =============================================================================
-# KORREKTUR: Alle neuen Quelldateien hinzugefügt. C++23-Standard korrekt
-# gesetzt. Abhängigkeiten über vcpkg verwaltet.
+# KORREKTUR P3:
+# • libsodium, nlohmann-json, OpenSSL als Abhängigkeiten hinzugefügt
+# • PostgreSQL und Redis als optionale Features
+# • Korrekte Link-Reihenfolge für Auth-Module
 # =============================================================================
 
 project(TheSeed VERSION 13.2 LANGUAGES CXX)
@@ -18,7 +19,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # =============================================================================
 if(MSVC)
     add_compile_options(/W4 /WX- /permissive- /Zc:__cplusplus)
-    add_compile_options(/MP) # Multi-processor compilation
+    add_compile_options(/MP)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
     add_compile_options(-O3 -march=native)
@@ -33,7 +34,7 @@ if(DEFINED ENV{VCPKG_ROOT})
 endif()
 
 # =============================================================================
-# Abhängigkeiten finden
+# Abhängigkeiten finden (Basis)
 # =============================================================================
 find_package(glfw3 CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
@@ -44,6 +45,36 @@ find_package(magic_enum CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
 # =============================================================================
+# Auth-Abhängigkeiten (P3-FIX)
+# =============================================================================
+# nlohmann-json (für JWT Payload)
+find_package(nlohmann_json CONFIG)
+if(nlohmann_json_FOUND)
+    add_compile_definitions(HAS_NLOHMANN_JSON)
+endif()
+
+# libsodium (für Argon2id)
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(SODIUM libsodium)
+    if(SODIUM_FOUND)
+        add_compile_definitions(HAS_LIBSODIUM)
+        message(STATUS "libsodium gefunden: Argon2id aktiviert")
+    else()
+        message(WARNING "libsodium nicht gefunden. Fallback-Hashing wird verwendet.")
+    endif()
+endif()
+
+# OpenSSL (für HMAC-SHA256 JWT Signing)
+find_package(OpenSSL)
+if(OpenSSL_FOUND)
+    add_compile_definitions(HAS_OPENSSL)
+    message(STATUS "OpenSSL gefunden: JWT HMAC-SHA256 aktiviert")
+else()
+    message(WARNING "OpenSSL nicht gefunden. JWT-Signing deaktiviert.")
+endif()
+
+# =============================================================================
 # Vulkan (optional)
 # =============================================================================
 find_package(Vulkan)
@@ -52,24 +83,26 @@ if(Vulkan_FOUND)
 endif()
 
 # =============================================================================
-# PostgreSQL (optional, for auth service)
+# PostgreSQL (optional, für Auth Service)
 # =============================================================================
 find_package(PostgreSQL)
 if(PostgreSQL_FOUND)
     add_compile_definitions(POSTGRESQL_AVAILABLE)
-    target_link_libraries(TheSeed PRIVATE PostgreSQL::PostgreSQL)
+    message(STATUS "PostgreSQL gefunden: PostgreSqlUserRepository aktiviert")
+else()
+    message(WARNING "PostgreSQL nicht gefunden. PostgreSqlUserRepository wird gestubbt.")
 endif()
 
 # =============================================================================
-# Redis/hiredis (optional, for rate limiting)
+# Redis/hiredis (optional, für Rate Limiting)
 # =============================================================================
-find_package(PkgConfig)
 if(PkgConfig_FOUND)
     pkg_check_modules(HIREDIS hiredis)
     if(HIREDIS_FOUND)
         add_compile_definitions(REDIS_AVAILABLE)
-        target_link_libraries(TheSeed PRIVATE ${HIREDIS_LIBRARIES})
-        target_include_directories(TheSeed PRIVATE ${HIREDIS_INCLUDE_DIRS})
+        message(STATUS "hiredis gefunden: RedisRateLimiter aktiviert")
+    else()
+        message(WARNING "hiredis nicht gefunden. RedisRateLimiter wird gestubbt.")
     endif()
 endif()
 
@@ -113,17 +146,13 @@ set(SERVER_AUTH_SOURCES
     server/auth/SqliteUserRepository.cpp
 )
 
-# FIX P3: Optional PostgreSQL/Redis auth backends
+# FIX P3: Optionale Auth-Backends
 if(PostgreSQL_FOUND)
     list(APPEND SERVER_AUTH_SOURCES server/auth/PostgreSqlUserRepository.cpp)
-else()
-    message(WARNING "PostgreSQL not found. PostgreSqlUserRepository will be stubbed.")
 endif()
 
 if(HIREDIS_FOUND)
     list(APPEND SERVER_AUTH_SOURCES server/auth/RedisRateLimiter.cpp)
-else()
-    message(WARNING "hiredis not found. RedisRateLimiter will be stubbed.")
 endif()
 
 set(SERVER_COMBAT_SOURCES
@@ -221,6 +250,16 @@ target_include_directories(TheSeed PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/memory
 )
 
+# FIX P3: libsodium Include-Verzeichnis
+if(SODIUM_FOUND)
+    target_include_directories(TheSeed PRIVATE ${SODIUM_INCLUDE_DIRS})
+endif()
+
+# FIX P3: hiredis Include-Verzeichnis
+if(HIREDIS_FOUND)
+    target_include_directories(TheSeed PRIVATE ${HIREDIS_INCLUDE_DIRS})
+endif()
+
 # =============================================================================
 # Link-Bibliotheken
 # =============================================================================
@@ -234,6 +273,27 @@ target_link_libraries(TheSeed PRIVATE
     Threads::Threads
 )
 
+# FIX P3: Auth-Abhängigkeiten verlinken
+if(nlohmann_json_FOUND)
+    target_link_libraries(TheSeed PRIVATE nlohmann_json::nlohmann_json)
+endif()
+
+if(SODIUM_FOUND)
+    target_link_libraries(TheSeed PRIVATE ${SODIUM_LIBRARIES})
+endif()
+
+if(OpenSSL_FOUND)
+    target_link_libraries(TheSeed PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+if(PostgreSQL_FOUND)
+    target_link_libraries(TheSeed PRIVATE PostgreSQL::PostgreSQL)
+endif()
+
+if(HIREDIS_FOUND)
+    target_link_libraries(TheSeed PRIVATE ${HIREDIS_LIBRARIES})
+endif()
+
 if(Vulkan_FOUND)
     target_link_libraries(TheSeed PRIVATE Vulkan::Vulkan)
 endif()
@@ -243,8 +303,8 @@ endif()
 # =============================================================================
 if(WIN32)
     target_link_libraries(TheSeed PRIVATE
-        ws2_32      # Winsock2
-        iphlpapi    # IP Helper
+        ws2_32
+        iphlpapi
     )
 endif()
 

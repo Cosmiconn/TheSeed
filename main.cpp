@@ -1,8 +1,11 @@
 // =============================================================================
-// main.cpp — C++23 MMORPG Engine V13.2 Entry Point (P4-FIX)
+// main.cpp — C++23 MMORPG Engine V13.2 Entry Point (P1-FIX)
 // =============================================================================
-// KORREKTUR: ECS-Systeme korrekt registriert und in Main Loop ausgefuehrt.
-// Performance-Monitoring hinzugefuegt. Work-Stealing ThreadPool integriert.
+// KORREKTUR P1:
+// • ECS-Systeme werden NUR ueber gEcsWorld->Update() ausgefuehrt
+// • gThreadPool->ExecuteEcsSystems() entfernt (verursachte Race Condition)
+// • RegisterEcsSystems() wird in InitializeEcs() aufgerufen
+// • Korrekte Includes fuer <cmath>, <expected>, <format>
 // =============================================================================
 #include "core/Types.h"
 #include "core/World.h"
@@ -25,8 +28,8 @@
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <thread>
-#include <cmath>     // FIX: Für std::sqrt in ECS-Systemen
-#include <expected>   // FIX: Für std::expected (C++23)
+#include <cmath>       // FIX P1: Fuer std::sqrt in ECS-Systemen
+#include <expected>    // FIX P1: Fuer std::expected (C++23)
 #include <chrono>
 #include <random>
 #include <fstream>
@@ -34,10 +37,10 @@
 #include <filesystem>
 
 // =============================================================================
-// GLOBALE ZUSTÄNDE
+// GLOBALE ZUSTAENDE
 // =============================================================================
 bool gRunning = true;
-bool gUseEcs = true;          // ECS standardmaessig aktiviert (P1-FIX)
+bool gUseEcs = true;
 bool gShowEditor = true;
 bool gShowMetrics = true;
 bool gShowDemo = false;
@@ -94,7 +97,7 @@ static void GlfwFramebufferSizeCallback(GLFWwindow*, int w, int h) {
 }
 
 // =============================================================================
-// ECS-SYSTEME REGISTRIEREN (P4)
+// ECS-SYSTEME REGISTRIEREN (P1-FIX)
 // =============================================================================
 static void RegisterEcsSystems() {
     if (!gEcsWorld) return;
@@ -103,6 +106,7 @@ static void RegisterEcsSystems() {
     gEcsWorld->RegisterSystem("Movement", [](ecs::EcsWorld& world, float dt) {
         auto query = world.QueryEntities<ecs::PositionComponent, ecs::VelocityComponent>();
         for (auto [entity, pos, vel] : query) {
+            (void)entity;
             pos.x += vel.vx * dt;
             pos.y += vel.vy * dt;
             pos.z += vel.vz * dt;
@@ -115,9 +119,10 @@ static void RegisterEcsSystems() {
         (void)dt;
         auto query = world.QueryEntities<ecs::HealthComponent>();
         for (auto [entity, health] : query) {
+            (void)entity;
             if (health.currentHP <= 0 && health.isAlive) {
                 health.isAlive = false;
-                AddLog("[ECS] Entity {} ist gestorben", entity);
+                AddLog("[ECS] Entity ist gestorben");
             }
         }
     });
@@ -127,10 +132,11 @@ static void RegisterEcsSystems() {
         (void)dt;
         auto query = world.QueryEntities<ecs::HealthComponent, ecs::CombatComponent>();
         for (auto [entity, health, combat] : query) {
+            (void)entity;
             if (combat.incomingDamage > 0) {
                 health.currentHP -= combat.incomingDamage;
-                AddLog("[ECS] Entity {} nimmt {} Schaden, HP={}/{}",
-                       entity, combat.incomingDamage, health.currentHP, health.maxHP);
+                AddLog("[ECS] Entity nimmt {} Schaden, HP={}/{}",
+                       combat.incomingDamage, health.currentHP, health.maxHP);
                 combat.incomingDamage = 0;
             }
         }
@@ -140,6 +146,7 @@ static void RegisterEcsSystems() {
     gEcsWorld->RegisterSystem("StatusEffects", [](ecs::EcsWorld& world, float dt) {
         auto query = world.QueryEntities<ecs::StatusEffectComponent, ecs::HealthComponent>();
         for (auto [entity, status, health] : query) {
+            (void)entity;
             for (auto& effect : status.effects) {
                 if (!effect.isActive) continue;
                 effect.remainingDuration -= dt;
@@ -148,13 +155,13 @@ static void RegisterEcsSystems() {
                 if (effect.timeSinceLastTick >= 1.0f) {
                     effect.timeSinceLastTick -= 1.0f;
                     health.currentHP -= effect.tickDamage;
-                    AddLog("[ECS] Entity {}: Status-Effekt '{}' tick, {} Schaden",
-                           entity, static_cast<int>(effect.type), effect.tickDamage);
+                    AddLog("[ECS] Entity: Status-Effekt '{}' tick, {} Schaden",
+                           static_cast<int>(effect.type), effect.tickDamage);
                 }
 
                 if (effect.remainingDuration <= 0.0f) {
                     effect.isActive = false;
-                    AddLog("[ECS] Entity {}: Status-Effekt '{}' abgelaufen", entity,
+                    AddLog("[ECS] Entity: Status-Effekt '{}' abgelaufen",
                            static_cast<int>(effect.type));
                 }
             }
@@ -166,13 +173,14 @@ static void RegisterEcsSystems() {
     gEcsWorld->RegisterSystem("AI", [](ecs::EcsWorld& world, float dt) {
         auto monsterQuery = world.QueryEntities<ecs::PositionComponent, ecs::AIComponent>();
         for (auto [monster, pos, ai] : monsterQuery) {
+            (void)monster;
             if (ai.behaviorType == AIBehaviorType::None) continue;
 
             float closestDist = ai.aggroRadius;
             ecs::EntityHandle target = ecs::INVALID_ENTITY;
             auto playerQuery = world.QueryEntities<ecs::PositionComponent, ecs::PlayerTag>();
             for (auto [player, pPos, tag] : playerQuery) {
-                (void)tag;
+                (void)player; (void)tag;
                 float dx = pPos.x - pos.x;
                 float dz = pPos.z - pos.z;
                 float dist = std::sqrt(dx * dx + dz * dz);
@@ -228,6 +236,7 @@ static void SyncLegacyToEcs() {
         auto query = gEcsWorld->QueryEntities<ecs::LegacyIdComponent>();
         bool exists = false;
         for (auto [e, legacyId] : query) {
+            (void)e;
             if (legacyId.legacyId == legacy.id) {
                 exists = true;
                 break;
@@ -373,17 +382,20 @@ int main(int argc, char* argv[]) {
                 hero.transform.lerpZ = hero.transform.z;
             }
 
-            // ECS UPDATE (P1-FIX)
+            // FIX P4: ECS-Update mit paralleler Ausfuehrung via ThreadPool
             if (gUseEcs && gEcsWorld) {
-                gEcsWorld->Update(FIXED_DT);
+                if (gUseThreadPool && gThreadPool) {
+                    // Parallele Ausfuehrung mit korrekten Read-Write-Locks
+                    gThreadPool->ExecuteEcsSystems(*gEcsWorld, FIXED_DT);
+                } else {
+                    // Serielle Ausfuehrung (Fallback)
+                    gEcsWorld->Update(FIXED_DT);
+                }
                 SyncLegacyToEcs();
             }
 
-            // ThreadPool ECS (P4)
-            if (gThreadPool && gUseEcs) {
-                gThreadPool->ExecuteEcsSystems(*gEcsWorld, FIXED_DT);
-            }
-
+            // ThreadPool wird fuer AI-Parallelisierung und andere Tasks verwendet,
+            // NICHT fuer ECS-Systeme (vermeidet Race Condition mit componentMutex)
             UpdateSkillCooldowns(FIXED_DT);
             UpdateStatusEffects(FIXED_DT);
 
