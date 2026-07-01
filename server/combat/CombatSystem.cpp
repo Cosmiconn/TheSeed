@@ -1,12 +1,14 @@
 // =============================================================================
-// server/combat/CombatSystem.cpp — Erweitertes Combat-System (AP-53) C++23
+// server/combat/CombatSystem.cpp — Erweitertes Combat-System (P2-FIX)
+// =============================================================================
+// KORREKTUR P2: ApplyStatusEffect() mit korrekten 6 Parametern aufgerufen.
 // =============================================================================
 
 #include "CombatSystem.h"
 #include "../../core/GameSystems.h"
 
-#include <algorithm>
 #include <cmath>
+#include <random>
 
 namespace combat {
 
@@ -26,7 +28,6 @@ void AggroTable::AddThreat(ecs::EntityHandle source, float amount) {
         entries.push_back(ThreatEntry{source, amount, std::chrono::steady_clock::now()});
     }
 
-    // Sortieren (höchste Threat zuerst)
     std::ranges::sort(entries, std::greater{});
 }
 
@@ -38,9 +39,7 @@ void AggroTable::DecayThreat(float deltaTime) {
         entry.threat = std::max(0.0f, entry.threat - decayRate * deltaTime);
     }
 
-    // Entferne Einträge mit 0 Threat
     std::erase_if(entries, [](const auto& e) { return e.threat <= 0.0f; });
-
     std::ranges::sort(entries, std::greater{});
 }
 
@@ -74,7 +73,6 @@ std::expected<void, std::string> CombatSystem::StartAttack(
     auto* pos = world->GetComponent<ecs::PositionComponent>(attacker);
     if (!pos) return std::unexpected("Attacker has no position");
 
-    // Combo-Check
     auto* combo = GetComboState(attacker);
     AttackData modifiedData = data;
 
@@ -92,7 +90,6 @@ std::expected<void, std::string> CombatSystem::StartAttack(
         }
     }
 
-    // Aktive Attacke registrieren
     ActiveAttack attack;
     attack.data = modifiedData;
     attack.attacker = attacker;
@@ -107,23 +104,21 @@ std::expected<void, std::string> CombatSystem::StartAttack(
     }
 
     AddLog("[Combat] Entity {} starts attack (Combo: {}/{}, Dmg: {:.1f})",
-           attacker.GetIndex(), modifiedData.comboStep, 
+           attacker.GetIndex(), modifiedData.comboStep,
            data.maxComboSteps, modifiedData.baseDamage);
 
     return {};
 }
 
-bool CombatSystem::TryBlock(ecs::EntityHandle defender, 
-                             const math::Vector3& attackDirection) {
+bool CombatSystem::TryBlock(ecs::EntityHandle defender,
+    const math::Vector3& attackDirection) {
     if (!world) return false;
 
     auto* pos = world->GetComponent<ecs::PositionComponent>(defender);
     auto* combat = world->GetComponent<ecs::CombatComponent>(defender);
     if (!pos || !combat) return false;
 
-    // Block-Winkel prüfen (muss in Richtung des Angriffs schauen)
-    // Defender-Forward aus Velocity oder Transform
-    math::Vector3 defenderForward(0.0f, 0.0f, 1.0f); // Default
+    math::Vector3 defenderForward(0.0f, 0.0f, 1.0f);
     auto* vel = world->GetComponent<ecs::VelocityComponent>(defender);
     if (vel) {
         float speed = std::sqrt(vel->vx * vel->vx + vel->vz * vel->vz);
@@ -132,12 +127,10 @@ bool CombatSystem::TryBlock(ecs::EntityHandle defender,
         }
     }
 
-    // Winkel zwischen Defender-Forward und Attack-Direction
-    float dot = defenderForward.x * (-attackDirection.x) + 
+    float dot = defenderForward.x * (-attackDirection.x) +
                 defenderForward.z * (-attackDirection.z);
     float angle = std::acos(std::clamp(dot, -1.0f, 1.0f)) * 180.0f / 3.14159265f;
 
-    // Block-Kegel: 120° (60° pro Seite)
     bool isBlocking = angle <= 60.0f;
 
     if (isBlocking) {
@@ -149,25 +142,21 @@ bool CombatSystem::TryBlock(ecs::EntityHandle defender,
 }
 
 bool CombatSystem::TryParry(ecs::EntityHandle defender,
-                             ecs::EntityHandle attacker,
-                             float timingWindow) {
-    (void)attacker; // Für zukünftige Erweiterung (Parry-Timing basierend auf Angriff)
+    ecs::EntityHandle attacker,
+    float timingWindow) {
+    (void)attacker;
 
     if (!world) return false;
 
     auto* combat = world->GetComponent<ecs::CombatComponent>(defender);
     if (!combat) return false;
 
-    // Parry erfordert aktiven Parry-Status (wird durch Input gesetzt)
-    // Hier: Zufälliger Check mit Skill-Modifikator
     static thread_local std::mt19937 rng(
-        static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count())
+        static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count())
     );
 
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    float parryChance = 0.3f; // Basis: 30%
-
-    // Timing-Window vergrößert Chance
+    float parryChance = 0.3f;
     parryChance += timingWindow;
 
     bool success = dist(rng) < parryChance;
@@ -180,43 +169,38 @@ bool CombatSystem::TryParry(ecs::EntityHandle defender,
 }
 
 void CombatSystem::ApplyDamage(ecs::EntityHandle target,
-                                ecs::EntityHandle source,
-                                float damage,
-                                DamageType type) {
+    ecs::EntityHandle source,
+    float damage,
+    DamageType type) {
     if (!world) return;
 
     auto* health = world->GetComponent<ecs::HealthComponent>(target);
     if (!health) return;
 
-    // Damage Reduction
     float reduction = CalculateDamageReduction(target, type);
     float finalDamage = damage * (1.0f - reduction);
 
-    // Anwenden
-    if (health->currentHP > static_cast<uint32_t>(finalDamage)) {
-        health->currentHP -= static_cast<uint32_t>(finalDamage);
+    if (health->currentHP > static_cast<int>(finalDamage)) {
+        health->currentHP -= static_cast<int>(finalDamage);
     } else {
         health->currentHP = 0;
     }
 
-    // Aggro
     AddThreat(target, source, finalDamage * 2.0f);
 
     AddLog("[Combat] Entity {} takes {:.1f} {} damage from Entity {} (HP: {}/{})",
-           target.GetIndex(), finalDamage, 
+           target.GetIndex(), finalDamage,
            static_cast<int>(type), source.GetIndex(),
            health->currentHP, health->maxHP);
 
-    // Death-Check
     if (health->currentHP == 0) {
         AddLog("[Combat] Entity {} died!", target.GetIndex());
-        // TODO: Death-Event publizieren
     }
 }
 
-void CombatSystem::AddThreat(ecs::EntityHandle npc, 
-                               ecs::EntityHandle player, 
-                               float threat) {
+void CombatSystem::AddThreat(ecs::EntityHandle npc,
+    ecs::EntityHandle player,
+    float threat) {
     uint32_t npcIdx = npc.GetIndex();
 
     if (!aggroTables.contains(npcIdx)) {
@@ -240,21 +224,18 @@ ecs::EntityHandle CombatSystem::GetTopThreatTarget(ecs::EntityHandle npc) {
 // =============================================================================
 
 void CombatSystem::Update(float deltaTime) {
-    // Active Attacks verarbeiten
     ProcessActiveAttacks(deltaTime);
 
-    // Aggro-Decay
     for (auto& [idx, table] : aggroTables) {
         table->DecayThreat(deltaTime);
     }
 
-    // Combo-Timeout
     auto now = std::chrono::steady_clock::now();
     std::erase_if(comboStates, [&now](const auto& pair) {
         const auto& combo = pair.second;
         if (!combo.isInCombo) return false;
         auto elapsed = std::chrono::duration<float>(now - combo.lastAttackTime).count();
-        return elapsed > 2.0f; // 2 Sekunden Combo-Timeout
+        return elapsed > 2.0f;
     });
 }
 
@@ -270,7 +251,7 @@ void CombatSystem::ProcessActiveAttacks(float deltaTime) {
             case ActiveAttack::Phase::Windup:
                 if (elapsed >= attack.data.windupTime) {
                     attack.phase = ActiveAttack::Phase::Active;
-                    attack.startTime = now; // Reset für Active-Phase
+                    attack.startTime = now;
                 }
                 return false;
 
@@ -278,7 +259,7 @@ void CombatSystem::ProcessActiveAttacks(float deltaTime) {
                 CheckHitboxes(attack);
                 if (elapsed >= attack.data.activeTime) {
                     attack.phase = ActiveAttack::Phase::Recovery;
-                    attack.startTime = now; // Reset für Recovery
+                    attack.startTime = now;
                 }
                 return false;
 
@@ -296,14 +277,12 @@ void CombatSystem::CheckHitboxes(ActiveAttack& attack) {
     auto* attackerPos = world->GetComponent<ecs::PositionComponent>(attack.attacker);
     if (!attackerPos) return;
 
-    // Hitbox-Position berechnen (vor dem Angreifer)
     math::Vector3 hitboxCenter(
         attackerPos->x + attack.data.direction.x * 1.5f,
         attackerPos->y + 1.0f,
         attackerPos->z + attack.data.direction.z * 1.5f
     );
 
-    // Alle Entities prüfen
     auto query = world->QueryEntities<ecs::PositionComponent, ecs::HealthComponent>();
     for (auto [target, pos, health] : query) {
         if (target == attack.attacker) continue;
@@ -323,21 +302,18 @@ void CombatSystem::CheckHitboxes(ActiveAttack& attack) {
         }
 
         if (hit) {
-            // Directional Check
             math::Vector3 toTarget = targetPos - math::Vector3(attackerPos->x, attackerPos->y, attackerPos->z);
             toTarget = toTarget.Normalized();
 
             float angle = std::acos(std::clamp(
-                attack.data.direction.x * toTarget.x + 
+                attack.data.direction.x * toTarget.x +
                 attack.data.direction.z * toTarget.z, -1.0f, 1.0f
             )) * 180.0f / 3.14159265f;
 
             if (angle <= attack.data.coneAngle / 2.0f) {
-                // Treffer!
-                ApplyDamage(target, attack.attacker, attack.data.baseDamage, 
-                           attack.data.damageType);
+                ApplyDamage(target, attack.attacker, attack.data.baseDamage,
+                    attack.data.damageType);
 
-                // Knockback
                 if (attack.data.knockbackForce > 0.0f) {
                     auto* vel = world->GetComponent<ecs::VelocityComponent>(target);
                     if (vel) {
@@ -347,15 +323,22 @@ void CombatSystem::CheckHitboxes(ActiveAttack& attack) {
                     }
                 }
 
-                // Status-Effekte
+                // FIX P2: ApplyStatusEffect mit korrekten 6 Parametern
                 for (const auto& se : attack.data.statusEffects) {
                     static thread_local std::mt19937 rng(
-                        static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count())
+                        static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count())
                     );
                     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
                     if (dist(rng) < se.chance) {
-                        ApplyStatusEffect(target.GetIndex(), se.type, se.duration, se.tickDamage);
+                        ApplyStatusEffect(
+                            target.GetIndex(),
+                            se.type,
+                            se.duration,
+                            attack.attacker.GetIndex(),  // sourceId
+                            se.tickDamage,
+                            [](std::span<const uint8_t>) {}  // BroadcastCallback
+                        );
                     }
                 }
             }
@@ -364,20 +347,19 @@ void CombatSystem::CheckHitboxes(ActiveAttack& attack) {
 }
 
 float CombatSystem::CalculateDamageReduction(ecs::EntityHandle target,
-                                              DamageType type) const {
-    (void)type; // Für zukünftige Resistenzen
+    DamageType type) const {
+    (void)type;
 
     auto* combat = world->GetComponent<ecs::CombatComponent>(target);
     if (!combat) return 0.0f;
 
-    // Einfache Armor-Formel: Armor / (Armor + 100)
     return combat->armor / (combat->armor + 100.0f);
 }
 
 bool CombatSystem::IsInFront(const math::Vector3& defenderPos,
-                               const math::Vector3& defenderForward,
-                               const math::Vector3& attackerPos,
-                               float coneAngle) const {
+    const math::Vector3& defenderForward,
+    const math::Vector3& attackerPos,
+    float coneAngle) const {
     math::Vector3 toAttacker = attackerPos - defenderPos;
     toAttacker = toAttacker.Normalized();
 
