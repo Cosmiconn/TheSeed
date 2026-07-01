@@ -1,17 +1,19 @@
 // =============================================================================
-// memory/PoolAllocator.cpp — Aligned Pool Allocator (P4-FIX)
+// memory/PoolAllocator.cpp — Aligned Pool Allocator (P4-FIX + AP-80)
 // =============================================================================
 // KORREKTUR P4:
 // • 64-Byte Alignment mit aligned_alloc / _aligned_malloc
 // • SIMD-freundliche Speicheranordnung
-// • Prefetching für nächste Allokation
+// • Prefetching fuer naechste Allokation
 // • Korrekte Freigabe mit aligned_free
+// KORREKTUR AP-80:
+// • Memory Profiler Tracking bei Allokation und Freigabe
 // =============================================================================
 #include "PoolAllocator.h"
 #include <cstring>
 
 #ifdef _WIN32
-    #include <malloc.h>
+ #include <malloc.h>
 #endif
 
 namespace memory {
@@ -19,8 +21,10 @@ namespace memory {
 // =============================================================================
 // Konstruktor
 // =============================================================================
-PoolAllocator::PoolAllocator(size_t objSize, size_t objCount, size_t align)
-    : objectSize(std::max(objSize, sizeof(FreeNode))),
+PoolAllocator::PoolAllocator(size_t objSize, size_t objCount, size_t align,
+                              std::string_view allocatorName)
+    : name(allocatorName),
+      objectSize(std::max(objSize, sizeof(FreeNode))),
       totalCount(objCount),
       freeCount(objCount),
       alignment(align)
@@ -50,6 +54,9 @@ PoolAllocator::PoolAllocator(size_t objSize, size_t objCount, size_t align)
 
     allocatedSize = blockSize;
 
+    // AP-80: Track die initiale Allokation
+    TrackPoolAllocation(rawMemory, blockSize, name);
+
     // P4-FIX: Null-Initialisierung (SIMD-optimiert)
     std::memset(alignedMemory, 0, alignedObjSize * totalCount);
 
@@ -57,7 +64,7 @@ PoolAllocator::PoolAllocator(size_t objSize, size_t objCount, size_t align)
     freeList = nullptr;
     for (size_t i = 0; i < totalCount; ++i) {
         FreeNode* node = reinterpret_cast<FreeNode*>(
-            reinterpret_cast<uintptr_t>(alignedMemory) + i * alignedObjSize);
+            reinterpret_cast<uint8_t*>(alignedMemory) + i * alignedObjSize);
         node->next = freeList;
         freeList = node;
     }
@@ -68,6 +75,9 @@ PoolAllocator::PoolAllocator(size_t objSize, size_t objCount, size_t align)
 // =============================================================================
 PoolAllocator::~PoolAllocator() {
     if (rawMemory) {
+        // AP-80: Track Freigabe
+        TrackPoolFree(rawMemory, name);
+
 #ifdef _WIN32
         _aligned_free(rawMemory);
 #else
@@ -86,6 +96,11 @@ void* PoolAllocator::Allocate() {
     FreeNode* node = freeList;
     freeList = freeList->next;
     --freeCount;
+
+    // AP-80: Track einzelne Allokation
+    size_t alignedObjSize = (objectSize + alignment - 1) & ~(alignment - 1);
+    TrackPoolAllocation(node, alignedObjSize, name);
+
     return node;
 }
 
@@ -94,6 +109,11 @@ void* PoolAllocator::Allocate() {
 // =============================================================================
 void PoolAllocator::Free(void* ptr) {
     if (!ptr) return;
+
+    // AP-80: Track Freigabe
+    size_t alignedObjSize = (objectSize + alignment - 1) & ~(alignment - 1);
+    TrackPoolFree(ptr, name);
+
     FreeNode* node = static_cast<FreeNode*>(ptr);
     node->next = freeList;
     freeList = node;
@@ -104,6 +124,10 @@ void PoolAllocator::Free(void* ptr) {
 // Reset
 // =============================================================================
 void PoolAllocator::Reset() {
+    // AP-80: Track Freigabe aller aktiven Allokationen
+    // (Vereinfacht: Reset als Massen-Freigabe)
+    TrackPoolFree(rawMemory, name);
+
     freeCount = totalCount;
     freeList = nullptr;
 
@@ -115,10 +139,13 @@ void PoolAllocator::Reset() {
     // Freie Liste neu aufbauen
     for (size_t i = 0; i < totalCount; ++i) {
         FreeNode* node = reinterpret_cast<FreeNode*>(
-            reinterpret_cast<uintptr_t>(alignedMemory) + i * alignedObjSize);
+            reinterpret_cast<uint8_t*>(alignedMemory) + i * alignedObjSize);
         node->next = freeList;
         freeList = node;
     }
+
+    // AP-80: Track neue initiale Allokation
+    TrackPoolAllocation(rawMemory, allocatedSize, name);
 }
 
 // =============================================================================

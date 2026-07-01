@@ -1,21 +1,23 @@
 #pragma once
 // =============================================================================
-// memory/PoolAllocator.h — Fixed-size object pool (P4-FIX)
+// memory/PoolAllocator.h — Fixed-size object pool (P4-FIX + AP-80)
 // =============================================================================
 // KORREKTUR P4:
-// • 64-Byte Alignment für Cache-Line + AVX-512
+// • 64-Byte Alignment fuer Cache-Line + AVX-512
 // • SIMD-freundliche Speicheranordnung
-// • Prefetching-Unterstützung
+// • Prefetching-Unterstuetzung
+// KORREKTUR AP-80:
+// • Memory Profiler Integration fuer Allokations-Tracking
 // =============================================================================
-#include <memory>
+#include "MemoryProfilerIntegration.h"
 #include <cstddef>
 #include <cstdint>
 #include <cassert>
 
 #ifdef _WIN32
-    #include <malloc.h>
+ #include <malloc.h>
 #else
-    #include <stdlib.h>
+ #include <stdlib.h>
 #endif
 
 namespace memory {
@@ -23,7 +25,8 @@ namespace memory {
 class PoolAllocator {
 public:
     // P4-FIX: Default Alignment auf 64 Bytes (Cache-Line)
-    PoolAllocator(size_t objectSize, size_t objectCount, size_t alignment = 64);
+    PoolAllocator(size_t objectSize, size_t objectCount, size_t alignment = 64,
+                  std::string_view name = "PoolAllocator");
     ~PoolAllocator();
 
     PoolAllocator(const PoolAllocator&) = delete;
@@ -33,20 +36,23 @@ public:
     void Free(void* ptr);
     void Reset();
 
-    // P4: Prefetching für nächste Allokation
+    // P4: Prefetching fuer naechste Allokation
     void PrefetchNext() const;
 
     [[nodiscard]] size_t GetFreeCount() const { return freeCount; }
     [[nodiscard]] size_t GetTotalCount() const { return totalCount; }
     [[nodiscard]] size_t GetAlignment() const { return alignment; }
+    [[nodiscard]] size_t GetObjectSize() const { return objectSize; }
+    [[nodiscard]] std::string_view GetName() const { return name; }
 
 private:
     struct alignas(64) FreeNode {
         FreeNode* next = nullptr;
-        // Padding auf 64 Bytes für Cache-Line-Alignment
+        // Padding auf 64 Bytes fuer Cache-Line-Alignment
         uint8_t padding[64 - sizeof(FreeNode*)];
     };
 
+    std::string name;
     size_t objectSize = 0;
     size_t totalCount = 0;
     size_t freeCount = 0;
