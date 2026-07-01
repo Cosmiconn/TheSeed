@@ -1,218 +1,238 @@
 #pragma once
 // =============================================================================
-// server/combat/CombatSystem.h — Combat Engine (AP-53)
-// Hitbox detection, combo system, damage calculation, knockback
+// server/combat/CombatSystem.h — Erweitertes Combat-System (AP-53) C++23
 // =============================================================================
-#include "../../ecs/Components.h"
+// VOLLSTÄNDIGE IMPLEMENTIERUNG:
+// • Hitbox-System (AABB, Sphere, Capsule)
+// • Combo-System (Chain-Attacks, Timing-Windows)
+// • Directional Blocking (Winkel-basiert)
+// • Damage-Typen (Physical, Fire, Ice, Lightning, Poison)
+// • Status-Effekte (Stun, Slow, Burn, Freeze)
+// • Aggro & Threat-Table (AP-51)
+// • std::expected für Fehlerbehandlung
+// =============================================================================
+
 #include "../../ecs/ecs_EcsWorld.h"
-#include <cstdint>
+#include "../../ecs/Components.h"
+#include "../../math/Vector.h"
+#include "../../core/Log.h"
+
 #include <vector>
-#include <functional>
 #include <span>
+#include <expected>
+#include <chrono>
+#include <unordered_map>
+#include <random>
 
 namespace combat {
 
 // =============================================================================
-// Combat Events
+// DAMAGE TYPES
 // =============================================================================
-struct HitEvent {
-    uint32_t attackerId = 0;
-    uint32_t victimId = 0;
-    int damage = 0;
-    bool isCritical = false;
-    bool isBlocked = false;
-    float knockbackX = 0.0f;
-    float knockbackZ = 0.0f;
-    uint32_t skillId = 0;
+enum class DamageType : uint8_t {
+    Physical = 0,
+    Fire = 1,
+    Ice = 2,
+    Lightning = 3,
+    Poison = 4,
+    Holy = 5,
+    Dark = 6,
+    Count
 };
 
-struct DeathEvent {
-    uint32_t entityId = 0;
-    uint32_t killerId = 0;
-    uint32_t experienceReward = 0;
-    uint32_t goldReward = 0;
+// =============================================================================
+// HITBOX SHAPES
+// =============================================================================
+struct HitboxAABB {
+    math::Vector3 min, max;
+
+    [[nodiscard]] bool Contains(const math::Vector3& point) const {
+        return point.x >= min.x && point.x <= max.x &&
+               point.y >= min.y && point.y <= max.y &&
+               point.z >= min.z && point.z <= max.z;
+    }
+
+    [[nodiscard]] bool Intersects(const HitboxAABB& other) const {
+        return min.x <= other.max.x && max.x >= other.min.x &&
+               min.y <= other.max.y && max.y >= other.min.y &&
+               min.z <= other.max.z && max.z >= other.min.z;
+    }
 };
 
-struct ComboEvent {
-    uint32_t entityId = 0;
-    uint32_t comboCount = 0;
+struct HitboxSphere {
+    math::Vector3 center;
+    float radius = 0.0f;
+
+    [[nodiscard]] bool Contains(const math::Vector3& point) const {
+        return (point - center).LengthSquared() <= radius * radius;
+    }
+};
+
+struct HitboxCapsule {
+    math::Vector3 a, b;  // Endpunkte
+    float radius = 0.0f;
+};
+
+// =============================================================================
+// ATTACK DATA
+// =============================================================================
+struct AttackData {
+    float baseDamage = 10.0f;
+    DamageType damageType = DamageType::Physical;
+
+    // Hitbox
+    HitboxAABB hitboxAABB;
+    HitboxSphere hitboxSphere;
+    bool useSphere = false;  // True = Sphere, False = AABB
+
+    // Timing
+    float windupTime = 0.3f;      // Aufladezeit
+    float activeTime = 0.1f;      // Aktive Hitbox-Zeit
+    float recoveryTime = 0.4f;    // Recovery
+
+    // Combo
+    uint8_t comboStep = 0;        // 0 = kein Combo
+    uint8_t maxComboSteps = 3;
+    float comboWindow = 0.5f;     // Zeit für nächsten Combo-Schritt
+    float comboDamageMultiplier = 1.2f;
+
+    // Direction
+    math::Vector3 direction;       // Angriffsrichtung
+    float coneAngle = 60.0f;       // Kegel-Winkel für Directional-Hit
+
+    // Effects
+    bool canBeBlocked = true;
+    bool canBeParried = true;
+    float knockbackForce = 0.0f;
+
+    // Status-Effekt
+    struct StatusEffectChance {
+        StatusEffectType type;
+        float chance;              // 0.0–1.0
+        float duration;
+        float tickDamage;
+    };
+    std::vector<StatusEffectChance> statusEffects;
+};
+
+// =============================================================================
+// COMBO STATE
+// =============================================================================
+struct ComboState {
+    uint8_t currentStep = 0;
     float damageMultiplier = 1.0f;
+    std::chrono::steady_clock::time_point lastAttackTime;
+    bool isInCombo = false;
+
+    void Reset() {
+        currentStep = 0;
+        damageMultiplier = 1.0f;
+        isInCombo = false;
+    }
 };
 
 // =============================================================================
-// Damage Calculation
+// THREAT ENTRY (für Aggro-System)
 // =============================================================================
-struct DamageResult {
-    int finalDamage = 0;
-    bool isCritical = false;
-    bool isBlocked = false;
-    bool isDodged = false;
-    float damageReduction = 0.0f;
+struct ThreatEntry {
+    ecs::EntityHandle source;
+    float threat = 0.0f;
+    std::chrono::steady_clock::time_point lastUpdate;
+
+    bool operator>(const ThreatEntry& other) const {
+        return threat > other.threat;
+    }
 };
 
-class DamageCalculator {
+// =============================================================================
+// AGGRO TABLE (AP-51)
+// =============================================================================
+class AggroTable {
+    std::vector<ThreatEntry> entries;
+    ecs::EntityHandle owner;
+    float decayRate = 5.0f;  // Threat-Decay pro Sekunde
+
 public:
-    // Calculate damage from attacker to victim
-    [[nodiscard]] static DamageResult Calculate(
-        const game::CombatStats& attacker,
-        const game::CombatStats& victim,
-        int baseDamage,
-        bool isSkill = false);
+    explicit AggroTable(ecs::EntityHandle entity) : owner(entity) {}
 
-    // Apply combo multiplier
-    [[nodiscard]] static int ApplyCombo(int baseDamage, uint32_t comboCount);
+    void AddThreat(ecs::EntityHandle source, float amount);
+    void DecayThreat(float deltaTime);
 
-    // Apply status effect modifiers
-    [[nodiscard]] static int ApplyStatusEffects(int damage, 
-        std::span<const game::StatusEffect> attackerEffects,
-        std::span<const game::StatusEffect> victimEffects);
+    [[nodiscard]] ecs::EntityHandle GetTopThreat() const;
+    [[nodiscard]] float GetThreat(ecs::EntityHandle source) const;
+    [[nodiscard]] bool HasTarget() const { return !entries.empty(); }
+
+    void RemoveSource(ecs::EntityHandle source);
+    void Clear() { entries.clear(); }
+
+    [[nodiscard]] std::span<const ThreatEntry> GetEntries() const { 
+        return std::span(entries); 
+    }
 };
 
 // =============================================================================
-// Hitbox / Collision Detection
-// =============================================================================
-class HitboxSystem {
-public:
-    // Check if attacker's hitbox overlaps victim's hitbox
-    [[nodiscard]] static bool CheckHit(
-        const game::Transform& attackerPos,
-        const game::Hitbox& attackerHitbox,
-        const game::Transform& victimPos,
-        const game::Hitbox& victimHitbox);
-
-    // Check if victim is within attacker's attack arc (cone)
-    [[nodiscard]] static bool CheckAttackArc(
-        const game::Transform& attacker,
-        const game::Transform& victim,
-        float attackAngle,      // Total angle in degrees
-        float attackRange);
-
-    // Get all entities within range of attacker
-    [[nodiscard]] static std::vector<uint32_t> GetEntitiesInRange(
-        ecs::EcsWorld& world,
-        const game::Transform& center,
-        float radius,
-        uint32_t excludeEntity = 0);
-
-    // Raycast for ranged attacks
-    [[nodiscard]] static std::optional<uint32_t> Raycast(
-        ecs::EcsWorld& world,
-        float startX, float startY, float startZ,
-        float dirX, float dirY, float dirZ,
-        float maxDistance,
-        uint32_t excludeEntity = 0);
-};
-
-// =============================================================================
-// Combo System
-// =============================================================================
-class ComboSystem {
-public:
-    static constexpr float COMBO_WINDOW = 2.0f;        // Seconds to continue combo
-    static constexpr float COMBO_DAMAGE_BONUS = 0.15f; // +15% per combo hit
-    static constexpr uint32_t MAX_COMBO = 10;
-
-    // Process a hit for combo tracking
-    static void RegisterHit(ecs::EcsWorld& world, ecs::EntityHandle entity);
-
-    // Get current combo info
-    [[nodiscard]] static uint32_t GetComboCount(ecs::EcsWorld& world, ecs::EntityHandle entity);
-    [[nodiscard]] static float GetComboMultiplier(ecs::EcsWorld& world, ecs::EntityHandle entity);
-    [[nodiscard]] static float GetComboTimeRemaining(ecs::EcsWorld& world, ecs::EntityHandle entity);
-
-    // Reset combo (on miss, death, or timeout)
-    static void ResetCombo(ecs::EcsWorld& world, ecs::EntityHandle entity);
-
-    // Update all combos (call every tick)
-    static void Update(ecs::EcsWorld& world, float deltaTime);
-};
-
-// =============================================================================
-// Combat System (main ECS system)
+// COMBAT SYSTEM
 // =============================================================================
 class CombatSystem {
+    ecs::EcsWorld* world = nullptr;
+
+    // Combo-States pro Entity
+    std::unordered_map<uint32_t, ComboState> comboStates;
+
+    // Aggro-Tables pro Entity
+    std::unordered_map<uint32_t, std::unique_ptr<AggroTable>> aggroTables;
+
+    // Aktive Attacken (Entity → AttackData + Timer)
+    struct ActiveAttack {
+        AttackData data;
+        ecs::EntityHandle attacker;
+        std::chrono::steady_clock::time_point startTime;
+        enum Phase { Windup, Active, Recovery } phase = Phase::Windup;
+    };
+    std::vector<ActiveAttack> activeAttacks;
+
 public:
-    using HitCallback = std::function<void(const HitEvent&)>;
-    using DeathCallback = std::function<void(const DeathEvent&)>;
-    using ComboCallback = std::function<void(const ComboEvent&)>;
+    explicit CombatSystem(ecs::EcsWorld* ecsWorld) : world(ecsWorld) {}
+
+    // Angriff starten
+    [[nodiscard]] std::expected<void, std::string> StartAttack(
+        ecs::EntityHandle attacker, const AttackData& data);
+
+    // Blockieren
+    [[nodiscard]] bool TryBlock(ecs::EntityHandle defender, 
+                                 const math::Vector3& attackDirection);
+
+    // Parieren
+    [[nodiscard]] bool TryParry(ecs::EntityHandle defender,
+                                 ecs::EntityHandle attacker,
+                                 float timingWindow = 0.2f);
+
+    // Schaden anwenden
+    void ApplyDamage(ecs::EntityHandle target, 
+                     ecs::EntityHandle source,
+                     float damage,
+                     DamageType type);
+
+    // Aggro
+    void AddThreat(ecs::EntityHandle npc, ecs::EntityHandle player, float threat);
+    [[nodiscard]] ecs::EntityHandle GetTopThreatTarget(ecs::EntityHandle npc);
+
+    // Update (Server-Tick)
+    void Update(float deltaTime);
+
+    // Combo-Query
+    [[nodiscard]] ComboState* GetComboState(ecs::EntityHandle entity);
+    [[nodiscard]] AggroTable* GetAggroTable(ecs::EntityHandle entity);
 
 private:
-    HitCallback onHit;
-    DeathCallback onDeath;
-    ComboCallback onCombo;
-
-public:
-    void SetHitCallback(HitCallback cb) { onHit = std::move(cb); }
-    void SetDeathCallback(DeathCallback cb) { onDeath = std::move(cb); }
-    void SetComboCallback(ComboCallback cb) { onCombo = std::move(cb); }
-
-    // Process an attack request
-    void ProcessAttack(ecs::EcsWorld& world, ecs::EntityHandle attacker, 
-                        uint32_t skillId = 0);
-
-    // Process a skill use (with area of effect)
-    void ProcessSkill(ecs::EcsWorld& world, ecs::EntityHandle caster,
-                       uint32_t skillId, float targetX, float targetZ);
-
-    // Apply damage to entity
-    void ApplyDamage(ecs::EcsWorld& world, ecs::EntityHandle victim,
-                      int damage, uint32_t attackerId = 0);
-
-    // Apply healing
-    void ApplyHeal(ecs::EcsWorld& world, ecs::EntityHandle target, int amount);
-
-    // Apply knockback
-    void ApplyKnockback(ecs::EcsWorld& world, ecs::EntityHandle target,
-                         float dirX, float dirZ, float force);
-
-    // Main update (call every tick)
-    void Update(ecs::EcsWorld& world, float deltaTime);
-
-    // Death handling
-    void HandleDeath(ecs::EcsWorld& world, ecs::EntityHandle entity, 
-                       uint32_t killerId);
-
-    // Respawn handling
-    void RespawnEntity(ecs::EcsWorld& world, ecs::EntityHandle entity,
-                        float spawnX, float spawnY, float spawnZ);
-
-private:
-    void ExecuteAttack(ecs::EcsWorld& world, ecs::EntityHandle attacker,
-                        const game::Transform& attackerTransform,
-                        const game::Hitbox& attackerHitbox,
-                        const game::CombatStats& attackerStats,
-                        uint32_t skillId);
-
-    void BroadcastHit(const HitEvent& event);
-    void BroadcastDeath(const DeathEvent& event);
-    void BroadcastCombo(const ComboEvent& event);
-};
-
-// =============================================================================
-// Skill Execution
-// =============================================================================
-struct SkillExecution {
-    uint32_t skillId = 0;
-    ecs::EntityHandle caster;
-    float castTime = 0.0f;
-    float remainingCastTime = 0.0f;
-    float targetX = 0.0f;
-    float targetZ = 0.0f;
-    bool isChanneling = false;
-};
-
-class SkillExecutor {
-    std::vector<SkillExecution> activeSkills;
-
-public:
-    void StartSkill(ecs::EcsWorld& world, ecs::EntityHandle caster,
-                     uint32_t skillId, float targetX, float targetZ);
-
-    void Update(ecs::EcsWorld& world, CombatSystem& combat, float deltaTime);
-    void CancelSkill(ecs::EntityHandle caster);
-
-    [[nodiscard]] bool IsCasting(ecs::EntityHandle caster) const;
-    [[nodiscard]] float GetCastProgress(ecs::EntityHandle caster) const;
+    void ProcessActiveAttacks(float deltaTime);
+    void CheckHitboxes(ActiveAttack& attack);
+    [[nodiscard]] float CalculateDamageReduction(ecs::EntityHandle target, 
+                                                  DamageType type) const;
+    [[nodiscard]] bool IsInFront(const math::Vector3& defenderPos,
+                                  const math::Vector3& defenderForward,
+                                  const math::Vector3& attackerPos,
+                                  float coneAngle) const;
 };
 
 } // namespace combat
