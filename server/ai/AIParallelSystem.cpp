@@ -1,5 +1,10 @@
 // =============================================================================
-// server/ai/AIParallelSystem.cpp — KI-Parallelisierung Implementierung
+// server/ai/AIParallelSystem.cpp — KI-Parallelisierung Implementierung (P2-FIX)
+// =============================================================================
+// KORREKTUR P2:
+// • Verwendet ecs::AIComponent und ecs::PositionComponent statt
+//   nicht-existenten game::AIState und game::Transform
+// • ProcessChunk verwendet korrekte ECS-API
 // =============================================================================
 #include "AIParallelSystem.h"
 #include "../../core/Log.h"
@@ -16,20 +21,16 @@ AIUpdateStats AIParallelSystem::UpdateParallel(ecs::EcsWorld& world, float delta
     entitiesProcessed.store(0);
     chunksProcessed.store(0);
 
-    // Build work chunks
     auto chunks = BuildChunks(world, deltaTime);
 
     if (chunks.empty()) {
         return AIUpdateStats{};
     }
 
-    // Single-threaded fallback for small entity counts
     if (chunks.size() == 1) {
         ProcessChunk(chunks[0]);
-
         auto end = std::chrono::steady_clock::now();
         float elapsed = std::chrono::duration<float, std::milli>(end - start).count();
-
         return AIUpdateStats{
             .entitiesProcessed = entitiesProcessed.load(),
             .chunksProcessed = chunksProcessed.load(),
@@ -37,7 +38,6 @@ AIUpdateStats AIParallelSystem::UpdateParallel(ecs::EcsWorld& world, float delta
         };
     }
 
-    // Parallel execution via ThreadPool
     std::atomic<size_t> completedChunks{0};
     std::mutex completionMutex;
     std::condition_variable completionCV;
@@ -50,7 +50,6 @@ AIUpdateStats AIParallelSystem::UpdateParallel(ecs::EcsWorld& world, float delta
         });
     }
 
-    // Wait for all chunks to complete
     {
         std::unique_lock lock(completionMutex);
         completionCV.wait(lock, [&completedChunks, &chunks]() {
@@ -72,20 +71,21 @@ AIUpdateStats AIParallelSystem::UpdateParallel(ecs::EcsWorld& world, float delta
 }
 
 // =============================================================================
-// Build Chunks — Aufteilung in parallele Arbeitseinheiten
+// Build Chunks
 // =============================================================================
 std::vector<AIWorkChunk> AIParallelSystem::BuildChunks(ecs::EcsWorld& world, float deltaTime) {
     std::vector<AIWorkChunk> chunks;
 
-    // Query all entities with AIState
-    auto query = world.Query<game::AIState>();
+    // FIX P2: Verwendet ecs::AIComponent statt game::AIState
+    auto query = world.QueryEntities<ecs::AIComponent>();
 
     AIWorkChunk currentChunk;
     currentChunk.deltaTime = deltaTime;
     currentChunk.world = &world;
     currentChunk.aiSystem = &aiSystem;
 
-    for (auto [handle] : query) {
+    for (auto [handle, ai] : query) {
+        (void)ai;
         currentChunk.entities.push_back(handle);
 
         if (currentChunk.entities.size() >= ENTITIES_PER_CHUNK) {
@@ -97,12 +97,10 @@ std::vector<AIWorkChunk> AIParallelSystem::BuildChunks(ecs::EcsWorld& world, flo
         }
     }
 
-    // Add remaining entities
     if (!currentChunk.entities.empty()) {
         chunks.push_back(std::move(currentChunk));
     }
 
-    // If total entities < MIN_ENTITIES_FOR_PARALLEL, merge into single chunk
     size_t totalEntities = 0;
     for (const auto& chunk : chunks) {
         totalEntities += chunk.entities.size();
@@ -125,45 +123,35 @@ std::vector<AIWorkChunk> AIParallelSystem::BuildChunks(ecs::EcsWorld& world, flo
 }
 
 // =============================================================================
-// Process Chunk — Ein Worker verarbeitet seine Entities
+// Process Chunk
 // =============================================================================
 void AIParallelSystem::ProcessChunk(const AIWorkChunk& chunk) {
     if (!chunk.world || !chunk.aiSystem) return;
 
     for (const auto& entityHandle : chunk.entities) {
-        auto* aiState = chunk.world->GetComponent<game::AIState>(entityHandle);
-        if (!aiState) continue;
+        auto* aiComp = chunk.world->GetComponent<ecs::AIComponent>(entityHandle);
+        if (!aiComp) continue;
 
-        // Get or create AI context for this entity
         auto* context = chunk.aiSystem->GetContext(entityHandle);
-        if (!context) {
-            // Entity not registered with AI system yet
-            continue;
-        }
+        if (!context) continue;
 
-        // Update AI context
         auto& mutableContext = const_cast<AIContext&>(*context);
         mutableContext.timeInState += chunk.deltaTime;
         mutableContext.world = chunk.world;
         mutableContext.self = entityHandle;
 
-        // Execute behavior tree
-        // Note: In a full implementation, we'd look up the behavior tree
-        // for this entity and execute it. For now, we update the context.
-
-        // Update entity state based on AI
-        auto* transform = chunk.world->GetComponent<game::Transform>(entityHandle);
-        if (transform && mutableContext.targetEntity != 0) {
-            auto* targetTransform = chunk.world->GetComponent<game::Transform>(
+        // FIX P2: Verwendet ecs::PositionComponent statt game::Transform
+        auto* pos = chunk.world->GetComponent<ecs::PositionComponent>(entityHandle);
+        if (pos && mutableContext.targetEntity != 0) {
+            auto* targetPos = chunk.world->GetComponent<ecs::PositionComponent>(
                 ecs::EntityHandle(mutableContext.targetEntity));
-            if (targetTransform) {
-                // Simple chase logic (would be replaced by behavior tree)
-                float dx = targetTransform->x - transform->x;
-                float dz = targetTransform->z - transform->z;
+            if (targetPos) {
+                float dx = targetPos->x - pos->x;
+                float dz = targetPos->z - pos->z;
                 float dist = std::sqrt(dx*dx + dz*dz);
                 if (dist > 0.1f) {
-                    transform->x += (dx / dist) * 2.0f * chunk.deltaTime;
-                    transform->z += (dz / dist) * 2.0f * chunk.deltaTime;
+                    pos->x += (dx / dist) * 2.0f * chunk.deltaTime;
+                    pos->z += (dz / dist) * 2.0f * chunk.deltaTime;
                 }
             }
         }
