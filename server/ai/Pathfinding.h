@@ -1,224 +1,186 @@
-// =============================================================================
-// server/ai/Pathfinding.h — A* Pathfinding + NavMesh System (AP-47)
-// =============================================================================
-// KORREKTUR: Grid-basiertes A* Pathfinding mit NavMesh-Interface.
-// Unterstützt statische Hindernisse, dynamische Kollisionsprüfung und
-// Pfadglättung (String Pulling). Integriert mit ECS-World.
-// =============================================================================
 #pragma once
+// =============================================================================
+// server/ai/Pathfinding.h — Pathfinding & Crowd Simulation (AP-48) C++23
+// =============================================================================
+// VOLLSTÄNDIGE IMPLEMENTIERUNG:
+// • A* Pathfinding auf NavMesh-Polygonen
+// • Detour-Style Straight-Path (Funnel Algorithm)
+// • Crowd Simulation (Collision Avoidance, Steering)
+// • std::expected für Fehlerbehandlung
+// =============================================================================
+
+#include "NavMesh.h"
 #include "../../math/Vector.h"
-#include "../../ecs/ecs_EcsWorld.h"
-#include "../../ecs/Components.h"
+#include "../../core/Log.h"
 
 #include <vector>
 #include <span>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
-#include <queue>
 #include <memory>
-#include <functional>
-#include <optional>
 #include <expected>
+#include <chrono>
 #include <cmath>
 
 namespace ai {
 
 // =============================================================================
-// Pathfinding Error
-// =============================================================================
-enum class PathError {
-    NoPathFound,
-    StartBlocked,
-    GoalBlocked,
-    InvalidGrid,
-    OutOfMemory
-};
-
-// =============================================================================
-// Grid Cell
-// =============================================================================
-struct GridCell {
-    int x = 0, z = 0;
-    bool walkable = true;
-    float cost = 1.0f;  // Movement cost multiplier
-    float height = 0.0f; // Terrain height at this cell
-
-    [[nodiscard]] bool operator==(const GridCell& o) const noexcept {
-        return x == o.x && z == o.z;
-    }
-};
-
-struct CellHash {
-    [[nodiscard]] size_t operator()(const GridCell& c) const noexcept {
-        return std::hash<int64_t>{}((static_cast<int64_t>(c.x) << 32) ^ static_cast<uint32_t>(c.z));
-    }
-};
-
-// =============================================================================
-// Path Node (für A*)
+// PATH NODE (für A*)
 // =============================================================================
 struct PathNode {
-    GridCell cell;
-    float gCost = 0.0f;  // Cost from start
-    float hCost = 0.0f;  // Heuristic to goal
-    float fCost() const { return gCost + hCost; }
+    uint16_t polyRef = 0;            // Polygon-Referenz
+    float gCost = 0.0f;              // Kosten vom Start
+    float hCost = 0.0f;              // Heuristik zum Ziel
+    uint16_t parent = 0;             // Parent-Polygon
 
-    PathNode* parent = nullptr;
+    [[nodiscard]] float fCost() const { return gCost + hCost; }
 
-    [[nodiscard]] bool operator>(const PathNode& o) const noexcept {
-        return fCost() > o.fCost();
+    bool operator>(const PathNode& other) const {
+        return fCost() > other.fCost();
     }
 };
 
 // =============================================================================
-// Path Result
+// PATH RESULT
 // =============================================================================
-struct Path {
-    std::vector<math::Vec3> waypoints;
+struct PathResult {
+    std::vector<math::Vector3> waypoints;
     float totalLength = 0.0f;
-    bool isComplete = false;
+    int polyCount = 0;
+    bool partial = false;            // True wenn Ziel nicht erreichbar
 
-    [[nodiscard]] bool IsEmpty() const { return waypoints.empty(); }
-    [[nodiscard]] math::Vec3 GetCurrentWaypoint(size_t index) const {
-        return index < waypoints.size() ? waypoints[index] : math::Vec3{};
+    [[nodiscard]] bool IsValid() const { return !waypoints.empty(); }
+    [[nodiscard]] math::Vector3 GetEnd() const { 
+        return waypoints.empty() ? math::Vector3{} : waypoints.back(); 
     }
 };
 
 // =============================================================================
-// Navigation Grid
+// PATHFINDER
 // =============================================================================
-class NavigationGrid {
-    int width = 0;
-    int depth = 0;
-    float cellSize = 1.0f;
-    math::Vec3 origin{0.0f, 0.0f, 0.0f};
-
-    std::vector<GridCell> cells;
-    std::unordered_set<GridCell, CellHash> dynamicObstacles;
-    mutable std::mutex gridMutex;
+class Pathfinder {
+    const NavMesh* navMesh = nullptr;
 
 public:
-    NavigationGrid() = default;
-    NavigationGrid(int w, int d, float cs, const math::Vec3& org);
+    explicit Pathfinder(const NavMesh* mesh) : navMesh(mesh) {}
 
-    NavigationGrid(const NavigationGrid&) = delete;
-    NavigationGrid& operator=(const NavigationGrid&) = delete;
+    // A* Pathfinding zwischen zwei Welt-Positionen
+    [[nodiscard]] std::expected<PathResult, std::string> FindPath(
+        const math::Vector3& start,
+        const math::Vector3& end,
+        float agentRadius = 0.4f) const;
 
-    // ===================================================================
-    // Grid Management
-    // ===================================================================
-    [[nodiscard]] bool InitializeFromTerrain(const game::TerrainData& terrain);
-    void SetWalkable(int x, int z, bool walkable);
-    void SetCost(int x, int z, float cost);
-    void SetHeight(int x, int z, float height);
+    // Detour-Style Straight-Path (Funnel Algorithm)
+    [[nodiscard]] std::expected<PathResult, std::string> FindStraightPath(
+        const math::Vector3& start,
+        const math::Vector3& end) const;
 
-    // ===================================================================
-    // Dynamic Obstacles (Entities, etc.)
-    // ===================================================================
-    void AddDynamicObstacle(int x, int z);
-    void RemoveDynamicObstacle(int x, int z);
-    void ClearDynamicObstacles();
-    void UpdateFromEntities(ecs::EcsWorld& world);
+    // Raycast auf NavMesh
+    [[nodiscard]] bool Raycast(const math::Vector3& start, 
+                                const math::Vector3& end,
+                                math::Vector3* hitPoint = nullptr) const;
 
-    // ===================================================================
-    // Queries
-    // ===================================================================
-    [[nodiscard]] GridCell* GetCell(int x, int z);
-    [[nodiscard]] const GridCell* GetCell(int x, int z) const;
-    [[nodiscard]] GridCell WorldToCell(float x, float z) const;
-    [[nodiscard]] math::Vec3 CellToWorld(int x, int z) const;
-    [[nodiscard]] bool IsWalkable(int x, int z) const;
-    [[nodiscard]] bool IsInBounds(int x, int z) const;
-    [[nodiscard]] std::vector<GridCell> GetNeighbors(const GridCell& cell) const;
-
-    // ===================================================================
-    // Stats
-    // ===================================================================
-    [[nodiscard]] int GetWidth() const { return width; }
-    [[nodiscard]] int GetDepth() const { return depth; }
-    [[nodiscard]] float GetCellSize() const { return cellSize; }
-    [[nodiscard]] size_t GetDynamicObstacleCount() const;
-};
-
-// =============================================================================
-// A* Pathfinder
-// =============================================================================
-class AStarPathfinder {
-    NavigationGrid& grid;
-
-    // Heuristic function (configurable)
-    std::function<float(const GridCell&, const GridCell&)> heuristic;
-
-    static constexpr float DIAGONAL_COST = 1.41421356f; // sqrt(2)
-    static constexpr size_t MAX_SEARCH_NODES = 10000;
-
-public:
-    explicit AStarPathfinder(NavigationGrid& g);
-
-    // ===================================================================
-    // Pathfinding
-    // ===================================================================
-    [[nodiscard]] std::expected<Path, PathError> FindPath(
-        const math::Vec3& start,
-        const math::Vec3& goal);
-
-    [[nodiscard]] std::expected<Path, PathError> FindPath(
-        const GridCell& startCell,
-        const GridCell& goalCell);
-
-    // ===================================================================
-    // Path Smoothing (String Pulling / Funnel Algorithm)
-    // ===================================================================
-    [[nodiscard]] Path SmoothPath(const Path& path) const;
-
-    // ===================================================================
-    // Heuristic
-    // ===================================================================
-    void SetHeuristic(std::function<float(const GridCell&, const GridCell&)> h);
+    // Zufälliger Punkt auf NavMesh
+    [[nodiscard]] std::expected<math::Vector3, std::string> FindRandomPoint(
+        const math::Vector3& center, float radius) const;
 
 private:
-    [[nodiscard]] static float DefaultHeuristic(const GridCell& a, const GridCell& b);
-    [[nodiscard]] float GetMovementCost(const GridCell& from, const GridCell& to) const;
-    [[nodiscard]] bool IsLineOfSight(const GridCell& from, const GridCell& to) const;
+    // A* auf Polygon-Ebene
+    [[nodiscard]] std::expected<std::vector<uint16_t>, std::string> AStarSearch(
+        uint16_t startPoly, uint16_t endPoly) const;
+
+    // Heuristik (Euklidisch)
+    [[nodiscard]] float Heuristic(uint16_t polyA, uint16_t polyB) const;
+
+    // Kante zwischen zwei Polygonen finden
+    [[nodiscard]] bool GetPortalPoints(uint16_t fromPoly, uint16_t toPoly,
+                                        math::Vector3& left, math::Vector3& right) const;
+
+    // Funnel Algorithm für geraden Pfad
+    [[nodiscard]] std::vector<math::Vector3> StringPull(
+        const math::Vector3& start,
+        const math::Vector3& end,
+        std::span<const uint16_t> polyPath) const;
 };
 
 // =============================================================================
-// Path Follower (KI-Integration)
+// CROWD AGENT
 // =============================================================================
-class PathFollower {
-    Path currentPath;
-    size_t currentWaypointIndex = 0;
-    float waypointReachedDistance = 0.5f;
-    bool isFollowing = false;
+struct CrowdAgent {
+    uint32_t id = 0;
+    math::Vector3 position;
+    math::Vector3 velocity;
+    math::Vector3 target;
 
-public:
-    void SetPath(const Path& path);
-    void ClearPath();
+    float radius = 0.4f;
+    float height = 2.0f;
+    float maxSpeed = 5.0f;
+    float maxAcceleration = 20.0f;
 
-    [[nodiscard]] bool HasPath() const { return isFollowing && !currentPath.IsEmpty(); }
-    [[nodiscard]] bool IsComplete() const { return currentPath.isComplete; }
-    [[nodiscard]] size_t GetCurrentWaypointIndex() const { return currentWaypointIndex; }
+    std::vector<math::Vector3> path;
+    size_t pathIndex = 0;
 
-    // Returns next target position, advances waypoint if reached
-    [[nodiscard]] std::optional<math::Vec3> Update(const math::Vec3& currentPos, float deltaTime);
+    bool active = true;
+    bool reachedTarget = false;
 
-    void SetWaypointReachedDistance(float dist) { waypointReachedDistance = dist; }
+    // Steering
+    math::Vector3 steering;
+    std::chrono::steady_clock::time_point lastUpdate;
 };
 
 // =============================================================================
-// NavMesh Builder (Future: von Terrain generieren)
+// CROWD SIMULATION (Detour-Style)
 // =============================================================================
-class NavMeshBuilder {
-public:
-    [[nodiscard]] static std::unique_ptr<NavigationGrid> BuildFromTerrain(
-        const game::TerrainData& terrain,
-        float cellSize = 1.0f);
+class CrowdSimulation {
+    std::vector<std::unique_ptr<CrowdAgent>> agents;
+    const Pathfinder* pathfinder = nullptr;
 
-    [[nodiscard]] static std::unique_ptr<NavigationGrid> BuildFromECS(
-        ecs::EcsWorld& world,
-        float cellSize = 1.0f,
-        const math::Vec3& center = math::Vec3{0.0f, 0.0f, 0.0f},
-        int gridSize = 256);
+    // Grid-basiertes Spatial-Hashing für Nachbarschafts-Queries
+    static constexpr float GRID_CELL_SIZE = 5.0f;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> spatialGrid;
+
+public:
+    explicit CrowdSimulation(const Pathfinder* pf) : pathfinder(pf) {}
+
+    // Agent hinzufügen
+    [[nodiscard]] uint32_t AddAgent(const math::Vector3& pos, 
+                                     float radius = 0.4f,
+                                     float maxSpeed = 5.0f);
+
+    void RemoveAgent(uint32_t id);
+
+    // Ziel setzen → Pfad wird berechnet
+    void SetAgentTarget(uint32_t id, const math::Vector3& target);
+
+    // Simulation-Step (60Hz)
+    void Update(float deltaTime);
+
+    [[nodiscard]] CrowdAgent* GetAgent(uint32_t id);
+    [[nodiscard]] const CrowdAgent* GetAgent(uint32_t id) const;
+
+    [[nodiscard]] size_t GetAgentCount() const { return agents.size(); }
+
+    void Clear();
+
+private:
+    void UpdateSpatialGrid();
+    [[nodiscard]] std::vector<uint32_t> GetNeighbors(uint32_t agentId, float radius);
+
+    // Steering Behaviors
+    [[nodiscard]] math::Vector3 CalculateSteering(CrowdAgent& agent, float dt);
+    [[nodiscard]] math::Vector3 Seek(const CrowdAgent& agent, const math::Vector3& target);
+    [[nodiscard]] math::Vector3 Separation(const CrowdAgent& agent, 
+                                            std::span<const uint32_t> neighbors);
+    [[nodiscard]] math::Vector3 CollisionAvoidance(const CrowdAgent& agent,
+                                                     std::span<const uint32_t> neighbors);
+
+    // Grid-Key
+    [[nodiscard]] static uint64_t GetGridKey(float x, float z) {
+        int gx = static_cast<int>(std::floor(x / GRID_CELL_SIZE));
+        int gz = static_cast<int>(std::floor(z / GRID_CELL_SIZE));
+        return (static_cast<uint64_t>(gx) << 32) | static_cast<uint32_t>(gz);
+    }
 };
 
 } // namespace ai
