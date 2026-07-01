@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # =============================================================================
-# TheSeed Engine — CMake Build Configuration (V13.2)
+# TheSeed Engine — CMake Build Configuration (V13.2 FIXED)
+# All missing source files added.
 # =============================================================================
 # KORREKTUR: Alle neuen Quelldateien hinzugefügt. C++23-Standard korrekt
 # gesetzt. Abhängigkeiten über vcpkg verwaltet.
@@ -51,6 +52,28 @@ if(Vulkan_FOUND)
 endif()
 
 # =============================================================================
+# PostgreSQL (optional, for auth service)
+# =============================================================================
+find_package(PostgreSQL)
+if(PostgreSQL_FOUND)
+    add_compile_definitions(POSTGRESQL_AVAILABLE)
+    target_link_libraries(TheSeed PRIVATE PostgreSQL::PostgreSQL)
+endif()
+
+# =============================================================================
+# Redis/hiredis (optional, for rate limiting)
+# =============================================================================
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(HIREDIS hiredis)
+    if(HIREDIS_FOUND)
+        add_compile_definitions(REDIS_AVAILABLE)
+        target_link_libraries(TheSeed PRIVATE ${HIREDIS_LIBRARIES})
+        target_include_directories(TheSeed PRIVATE ${HIREDIS_INCLUDE_DIRS})
+    endif()
+endif()
+
+# =============================================================================
 # Quelldateien
 # =============================================================================
 set(CORE_SOURCES
@@ -78,15 +101,54 @@ set(SERVER_SOURCES
     server/Server.cpp
 )
 
+set(SERVER_AI_SOURCES
+    server/ai/AIBehavior.cpp
+    server/ai/AIParallelSystem.cpp
+    server/ai/Pathfinding.cpp
+    server/ai/NavMesh.cpp
+)
+
+set(SERVER_AUTH_SOURCES
+    server/auth/AuthService.cpp
+    server/auth/SqliteUserRepository.cpp
+)
+
+# FIX P3: Optional PostgreSQL/Redis auth backends
+if(PostgreSQL_FOUND)
+    list(APPEND SERVER_AUTH_SOURCES server/auth/PostgreSqlUserRepository.cpp)
+else()
+    message(WARNING "PostgreSQL not found. PostgreSqlUserRepository will be stubbed.")
+endif()
+
+if(HIREDIS_FOUND)
+    list(APPEND SERVER_AUTH_SOURCES server/auth/RedisRateLimiter.cpp)
+else()
+    message(WARNING "hiredis not found. RedisRateLimiter will be stubbed.")
+endif()
+
+set(SERVER_COMBAT_SOURCES
+    server/combat/CombatSystem.cpp
+)
+
+set(SERVER_NETWORK_SOURCES
+    server/network/Snapshot.cpp
+)
+
 set(CLIENT_SOURCES
     client/Connection.cpp
     client/ClientTick.cpp
     client/Renderer.cpp
     client/Interpolation.cpp
+    client/Animation.cpp
 )
 
 set(EDITOR_SOURCES
     editor/EditorRuntime.cpp
+    editor/EditorPanels.cpp
+    editor/AssetDatabase.cpp
+    editor/CommandSystem.cpp
+    editor/DataDefinitionEditor.cpp
+    editor/EntityEditor.cpp
 )
 
 set(VULKAN_SOURCES
@@ -123,6 +185,10 @@ set(ALL_SOURCES
     ${ECS_SOURCES}
     ${NETWORK_SOURCES}
     ${SERVER_SOURCES}
+    ${SERVER_AI_SOURCES}
+    ${SERVER_AUTH_SOURCES}
+    ${SERVER_COMBAT_SOURCES}
+    ${SERVER_NETWORK_SOURCES}
     ${CLIENT_SOURCES}
     ${EDITOR_SOURCES}
     ${VULKAN_SOURCES}
@@ -144,6 +210,10 @@ target_include_directories(TheSeed PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ecs
     ${CMAKE_CURRENT_SOURCE_DIR}/network
     ${CMAKE_CURRENT_SOURCE_DIR}/server
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/ai
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/auth
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/combat
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/network
     ${CMAKE_CURRENT_SOURCE_DIR}/client
     ${CMAKE_CURRENT_SOURCE_DIR}/editor
     ${CMAKE_CURRENT_SOURCE_DIR}/renderer_vulkan

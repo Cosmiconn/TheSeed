@@ -16,6 +16,20 @@
     "editor": {
       "description": "In-engine editor",
       "dependencies": ["imgui"]
+    },
+    "auth-postgresql": {
+      "description": "PostgreSQL backend for auth service",
+      "dependencies": ["libpq"]
+    },
+    "auth-redis": {
+      "description": "Redis backend for rate limiting",
+      "dependencies": ["hiredis"]
+    },
+    "auth-full": {
+      "description": "Full auth with PostgreSQL + Redis",
+      "dependencies": [
+        { "name": "theseed-engine", "default-features": false, "features": ["auth-postgresql", "auth-redis"] }
+      ]
     }
   }
 }

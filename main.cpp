@@ -25,6 +25,8 @@
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <thread>
+#include <cmath>     // FIX: Für std::sqrt in ECS-Systemen
+#include <expected>   // FIX: Für std::expected (C++23)
 #include <chrono>
 #include <random>
 #include <fstream>
