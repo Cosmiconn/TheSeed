@@ -143,8 +143,8 @@ EntityState SnapshotBuilder::ExtractEntityState(
 
     auto* health = world.GetComponent<game::Health>(handle);
     if (health) {
-        state.currentHP = static_cast<uint32_t>(health->current);
-        state.maxHP = static_cast<uint32_t>(health->max);
+        state.currentHP = static_cast<uint32_t>(health->currentHP);  // FIX P2: Feldname
+        state.maxHP = static_cast<uint32_t>(health->maxHP);  // FIX P2: Feldname
     }
 
     auto* name = world.GetComponent<game::Name>(handle);
@@ -516,3 +516,90 @@ ByteBuffer SnapshotBuilder::BuildFullSnapshot(
 }
 
 } // namespace net
+
+// =============================================================================
+// FIX P5-1: Snapshot-Fragmentierung (MTU-Splitting)
+// =============================================================================
+std::vector<SnapshotFragment> SnapshotBuilder::FragmentSnapshot(
+    const ByteBuffer& snapshotData,
+    uint32_t sequenceId) {
+
+    std::vector<SnapshotFragment> fragments;
+    const auto& data = snapshotData.data;
+
+    if (data.size() <= MAX_FRAGMENT_PAYLOAD) {
+        // Passt in ein Paket
+        SnapshotFragment frag;
+        frag.sequenceId = sequenceId;
+        frag.fragmentId = 0;
+        frag.totalFragments = 1;
+        frag.flags = SNAPSHOT_FLAG_LAST_FRAGMENT;
+        frag.payload.assign(data.begin(), data.end());
+        fragments.push_back(std::move(frag));
+        return fragments;
+    }
+
+    // Fragmentieren
+    size_t offset = 0;
+    uint16_t fragId = 0;
+    size_t totalFrags = (data.size() + MAX_FRAGMENT_PAYLOAD - 1) / MAX_FRAGMENT_PAYLOAD;
+
+    while (offset < data.size()) {
+        size_t remaining = data.size() - offset;
+        size_t chunkSize = std::min(remaining, MAX_FRAGMENT_PAYLOAD);
+
+        SnapshotFragment frag;
+        frag.sequenceId = sequenceId;
+        frag.fragmentId = fragId++;
+        frag.totalFragments = static_cast<uint16_t>(totalFrags);
+        frag.flags = (offset + chunkSize >= data.size()) ? SNAPSHOT_FLAG_LAST_FRAGMENT : 0;
+        frag.flags |= SNAPSHOT_FLAG_FRAGMENTED;
+        frag.payload.assign(data.begin() + offset, data.begin() + offset + chunkSize);
+
+        fragments.push_back(std::move(frag));
+        offset += chunkSize;
+    }
+
+    return fragments;
+}
+
+bool SnapshotBuilder::SendFragmentedSnapshot(
+    net::NetworkServer& server,
+    const ByteBuffer& snapshotData,
+    uint32_t sequenceId,
+    const std::string& ip,
+    uint16_t port) {
+
+    auto fragments = FragmentSnapshot(snapshotData, sequenceId);
+
+    for (const auto& frag : fragments) {
+        ByteBuffer fragBuffer;
+        fragBuffer.WriteUInt32(frag.sequenceId);
+        fragBuffer.WriteUInt16(frag.fragmentId);
+        fragBuffer.WriteUInt16(frag.totalFragments);
+        fragBuffer.WriteUInt8(frag.flags);
+        fragBuffer.WriteUInt32(static_cast<uint32_t>(frag.payload.size()));
+        fragBuffer.data.insert(fragBuffer.data.end(), frag.payload.begin(), frag.payload.end());
+
+        bool sent = server.SendReliable(
+            PacketHeader{.protocolId = 0x4D4D, .flags = static_cast<uint8_t>(PacketFlags::Reliable)},
+            std::span(fragBuffer.data.data(), fragBuffer.data.size()),
+            ip,
+            port
+        );
+
+        if (!sent) {
+            AddLog("[Snapshot] Fragment {}/{} konnte nicht gesendet werden",
+                   frag.fragmentId + 1, frag.totalFragments);
+            return false;
+        }
+    }
+
+    if (fragments.size() > 1) {
+        AddLog("[Snapshot] Snapshot {} in {} Fragmente aufgeteilt ({} Bytes → {} Bytes/Frag)",
+               sequenceId, fragments.size(), snapshotData.data.size(),
+               snapshotData.data.size() / fragments.size());
+    }
+
+    return true;
+}
