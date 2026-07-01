@@ -180,7 +180,8 @@ void DatabaseManager::SaveInventory(std::string_view username, const std::vector
 // =============================================================================
 bool RegisterAccount(std::string_view username, std::string_view password) {
     if (!GameDB || !GameDB->GetDB()) return false;
-    std::string hash = Argon2IdHash(password, "MMORPGEngineV12Salt");
+    // FIX: Jeder Account bekommt einen eigenen zufälligen Salt
+    std::string hash = Argon2IdHash(password);
     constexpr const char* q = "INSERT OR IGNORE INTO accounts(username,password_hash) VALUES(?,?);";
     sqlite3_stmt* s = nullptr;
     if (sqlite3_prepare_v2(GameDB->GetDB(), q, -1, &s, nullptr) == SQLITE_OK) {
@@ -194,16 +195,20 @@ bool RegisterAccount(std::string_view username, std::string_view password) {
 
 bool VerifyAccount(std::string_view username, std::string_view password) {
     if (!GameDB || !GameDB->GetDB()) return false;
-    std::string expected = Argon2IdHash(password, "MMORPGEngineV12Salt");
+    // FIX: Salt wird aus der gespeicherten Hash-Zeichenkette gelesen
     constexpr const char* q = "SELECT password_hash FROM accounts WHERE username=?;";
     sqlite3_stmt* s = nullptr; bool valid = false;
+    std::string storedHash;
     if (sqlite3_prepare_v2(GameDB->GetDB(), q, -1, &s, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, username.data(), static_cast<int>(username.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(s) == SQLITE_ROW) {
             const char* h = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
-            if (h && std::string_view(h) == expected) valid = true;
+            if (h) storedHash = h;
         }
         sqlite3_finalize(s);
+    }
+    if (!storedHash.empty()) {
+        valid = Argon2IdVerify(password, storedHash);  // FIX: Vergleicht mit gespeichertem Salt
     }
     return valid;
 }

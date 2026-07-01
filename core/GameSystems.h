@@ -62,6 +62,11 @@ void ScheduleRespawn(uint32_t spawnId, uint32_t templateId,
 void ProcessRespawnQueue(float deltaSec);
 
 // =============================================================================
+// ECS-SYSTEM REGISTRIERUNG (FIX P1-1)
+// =============================================================================
+void RegisterECSSystems();
+
+// =============================================================================
 // PASSWORT-SICHERHEIT
 // =============================================================================
 [[nodiscard]] std::string Argon2IdHash(std::string_view password, std::string_view salt);

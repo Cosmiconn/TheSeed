@@ -6,6 +6,7 @@
 // =============================================================================
 
 #include <cstdint>
+#include <cmath>  // FIX TERRAIN-1
 #include <string>
 #include <vector>
 #include <cstddef>
@@ -144,8 +145,57 @@ struct SpawnPoint {
 // =============================================================================
 // HILFSFUNKTIONEN
 // =============================================================================
+// FIX TERRAIN-1: Einfaches Terrain-Grid mit Perlin-Noise-ähnlicher Funktion
+inline float Noise2D(float x, float z) {
+    // Simple value noise for terrain generation
+    int ix = static_cast<int>(std::floor(x));
+    int iz = static_cast<int>(std::floor(z));
+    float fx = x - ix;
+    float fz = z - iz;
+
+    // Smooth interpolation
+    float u = fx * fx * (3.0f - 2.0f * fx);
+    float v = fz * fz * (3.0f - 2.0f * fz);
+
+    // Pseudo-random hash
+    auto hash = [](int x, int z) -> float {
+        uint32_t h = static_cast<uint32_t>(x * 374761393u + z * 668265263u);
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return static_cast<float>(h) / static_cast<float>(UINT32_MAX);
+    };
+
+    float n00 = hash(ix, iz);
+    float n10 = hash(ix + 1, iz);
+    float n01 = hash(ix, iz + 1);
+    float n11 = hash(ix + 1, iz + 1);
+
+    return n00 * (1.0f - u) * (1.0f - v) +
+           n10 * u * (1.0f - v) +
+           n01 * (1.0f - u) * v +
+           n11 * u * v;
+}
+
+inline float FbmNoise(float x, float z, int octaves = 4) {
+    float value = 0.0f;
+    float amplitude = 1.0f;
+    float frequency = 0.01f;
+    float maxValue = 0.0f;
+
+    for (int i = 0; i < octaves; ++i) {
+        value += amplitude * Noise2D(x * frequency, z * frequency);
+        maxValue += amplitude;
+        amplitude *= 0.5f;
+        frequency *= 2.0f;
+    }
+
+    return value / maxValue;
+}
+
 [[nodiscard]] inline float GetHeightFromGrid(float x, float z) {
-    (void)x; (void)z;
-    // TODO: Terrain-Grid implementieren
-    return 0.0f;
+    // FIX TERRAIN-1: Prozedurales Terrain mit mehreren Ebenen
+    float baseHeight = FbmNoise(x, z, 4) * 50.0f;      // Hügel (0-50m)
+    float detail = FbmNoise(x + 100.0f, z + 100.0f, 2) * 5.0f;  // Kleine Details
+    float mountains = std::pow(FbmNoise(x * 0.5f, z * 0.5f, 3), 2.0f) * 100.0f; // Berge
+
+    return baseHeight + detail + mountains;
 }

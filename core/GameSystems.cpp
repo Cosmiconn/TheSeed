@@ -242,14 +242,17 @@ void UpdateSkillCooldowns(float deltaTime) {
 // =============================================================================
 // STATUS-EFFEKTE
 // =============================================================================
-void ApplyStatusEffect(uint32_t targetId, StatusEffectType type, float durationSec, uint32_t tickDamage) {
-    auto it = std::ranges::find_if(serverRegistry, [targetId](const Entity& e) { return e.id == targetId; });
+void ApplyStatusEffect(uint32_t targetEntityId, StatusEffectType type,
+                       float durationSec, uint32_t sourceId, uint32_t tickDmg,
+                       const BroadcastCallback& broadcast) {
+    (void)sourceId; (void)broadcast;  // FIX P1-3: Parameter kompatibel mit Header
+    auto it = std::ranges::find_if(serverRegistry, [targetEntityId](const Entity& e) { return e.id == targetEntityId; });
     if (it == serverRegistry.end()) return;
-    StatusEffect se{.type = type, .durationSec = durationSec, .tickDamage = tickDamage, .elapsed = 0.0f};
+    StatusEffect se{.type = type, .durationSec = durationSec, .tickDamage = tickDmg, .elapsed = 0.0f};
     it->statusEffects.push_back(se);
-    AddLog("[Status] Entity {} erhaelt Effekt '{}' ({:.1f}s, {} dmg/tick)",
-           targetId, magic_enum::enum_name(type), durationSec, tickDamage);
-    gEventBus.Publish(StatusEffectAppliedEvent{targetId, 0, type, durationSec, tickDamage});
+    AddLog("[Status] Entity {} erhaelt Effekt '{}' ({:.1f}s, {} dmg/tick) von Entity {}",
+           targetEntityId, magic_enum::enum_name(type), durationSec, tickDmg, sourceId);  // FIX P1-4
+    gEventBus.Publish(StatusEffectAppliedEvent{targetEntityId, sourceId, type, durationSec, tickDmg});  // FIX P1-4: sourceId statt 0
 }
 
 void UpdateStatusEffects(float deltaTime) {
