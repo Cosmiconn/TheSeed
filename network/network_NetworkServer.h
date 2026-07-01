@@ -1,21 +1,25 @@
 #pragma once
 // =============================================================================
-// network/network_NetworkServer.h — High-Level Network Server (P4)
+// network/network_NetworkServer.h — High-Level Network Server (P2-FIX)
 // =============================================================================
-// KORREKTUR P4: Vollstaendige Deklaration. Packet-Callback. Session-Management.
+// KORREKTUR P2:
+// • SendFragmented() für MTU-konforme Pakete
+// • ProcessFragment() für Reassembly
+// • ProcessReceiveQueue() für Empfangs-Queue-Verarbeitung
 // =============================================================================
 #include "network_UdpSocket.h"
 #include "network_ReliableUdp.h"
 #include "../core/Types.h"
 
-#include <cstdint>
-#include <vector>
 #include <span>
-#include <memory>
+#include <vector>
+#include <string>
 #include <unordered_map>
 #include <mutex>
 #include <chrono>
 #include <functional>
+#include <deque>
+#include <atomic>
 
 namespace net {
 
@@ -49,7 +53,7 @@ struct ClientConnection {
     NetworkAddress address{};
     std::chrono::steady_clock::time_point connectedTime;
     std::chrono::steady_clock::time_point lastActivity;
-    std::unique_ptr<ReliableUdpChannel> reliableChannel;
+    std::unique_ptr<class ReliableUdpChannel> reliableChannel;
     bool authenticated = false;
     std::string playerName;
 };
@@ -63,7 +67,7 @@ public:
     static constexpr uint32_t MAX_RETRIES = 5;
 
     using PacketCallback = std::function<void(const PacketHeader&, std::span<const uint8_t>,
-                                               std::string_view, uint16_t)>;
+                                              std::string_view, uint16_t)>;
 
     NetworkServer();
     ~NetworkServer();
@@ -88,6 +92,7 @@ public:
     // ===================================================================
     void ProcessIncoming();
     void ProcessRetransmissions();
+    void ProcessReceiveQueue(); // P2-FIX: Empfangs-Queue verarbeiten
 
     // ===================================================================
     // Senden
@@ -96,6 +101,10 @@ public:
                     std::string_view ip, uint16_t port);
     void SendReliable(const PacketHeader& header, std::span<const uint8_t> payload,
                       std::string_view ip, uint16_t port);
+
+    // P2-FIX: Fragmentierte Sendung für große Pakete
+    void SendFragmented(const PacketHeader& header, std::span<const uint8_t> payload,
+                        std::string_view ip, uint16_t port);
 
     // ===================================================================
     // ACK-Verarbeitung
@@ -123,6 +132,10 @@ private:
 
     void QueueReliablePacket(uint16_t sequence, std::span<const uint8_t> payload,
                              std::string_view ip, uint16_t port);
+
+    // P2-FIX: Fragment-Verarbeitung
+    void ProcessFragment(const PacketHeader& header, std::span<const uint8_t> payload,
+                         std::string_view ip, uint16_t port);
 };
 
 } // namespace net
