@@ -10,6 +10,7 @@
 #include "PacketHandler.h"
 #include "Validation.h"
 #include "ThreadPool.h"
+#include "network/Snapshot.h"  // FIX P2: SnapshotBuilder + Interest Management
 #include "../core/GameSystems.h"
 #include "../core/EventSystem.h"
 #include "../core/EventTypes.h"
@@ -42,6 +43,9 @@ bool MultiThreadedServer::Start(uint16_t port) {
     running.store(true);
     serverThread = std::jthread(&MultiThreadedServer::ServerLoop, this);
 
+    // FIX P2: SnapshotBuilder initialisieren
+    snapshotBuilder = std::make_unique<net::SnapshotBuilder>();
+    
     AddLog("[Server] MultiThreadedServer gestartet auf Port {}", port);
     return true;
 }
@@ -69,7 +73,9 @@ void MultiThreadedServer::ServerLoop() {
         float dt = std::chrono::duration<float>(now - lastTick).count();
         lastTick = now;
 
-        // Eingehende Pakete verarbeiten
+        // FIX P1-2: ECS-Systeme laufen SEQUENTIELL bis Component-Locks implementiert sind
+    // (Vermeidet Race Conditions auf HealthComponent etc.)
+    // Eingehende Pakete verarbeiten
         networkServer.ProcessIncoming();
 
         // Retransmissions
@@ -217,68 +223,58 @@ void MultiThreadedServer::ProcessPacket(uint32_t sessionId, uint8_t packetType,
 // SNAPSHOT BUILDING
 // =============================================================================
 void MultiThreadedServer::BuildAndBroadcastSnapshot() {
-    ByteBuffer snapshot;
-
-    // Snapshot-Header
-    snapshot.WriteUInt8(std::to_underlying(PacketType::MSG_SNAPSHOT));
-    snapshot.WriteFloat(static_cast<float>(
-        std::chrono::duration<float>(
-            std::chrono::steady_clock::now().time_since_epoch()).count()));
-
-    if (gUseEcs && gEcsWorld) {
-        // KORREKTUR: Explizite Template-Parameter für ECS-Query
-        auto query = gEcsWorld->Query<game::Transform, game::Health>();
-        snapshot.WriteUInt32(static_cast<uint32_t>(query.Count()));
-
-        for (auto [entityHandle] : query) {
-            auto* pos = gEcsWorld->GetComponent<game::Transform>(entityHandle);
-            auto* health = gEcsWorld->GetComponent<game::Health>(entityHandle);
-            auto* legacy = gEcsWorld->GetComponent<game::LegacyId>(entityHandle);
-            auto* name = gEcsWorld->GetComponent<game::Name>(entityHandle);
-            auto* render = gEcsWorld->GetComponent<game::RenderInfo>(entityHandle);
-
-            if (!pos || !health) continue;
-
-            uint32_t id = legacy ? legacy->id : static_cast<uint32_t>(entityHandle.GetIndex());
-            snapshot.WriteUInt32(id);
-            snapshot.WriteFloat(pos->x);
-            snapshot.WriteFloat(pos->y);
-            snapshot.WriteFloat(pos->z);
-            snapshot.WriteUInt32(static_cast<uint32_t>(health->current));
-            snapshot.WriteUInt32(static_cast<uint32_t>(health->max));
-            snapshot.WriteString(name ? name->name : "Unknown");
-            snapshot.WriteString(render ? render->materialId : "default");
-        }
-    } else {
-        // Legacy-Entities in Snapshot packen
-        snapshot.WriteUInt32(static_cast<uint32_t>(serverRegistry.size()));
-        for (const auto& ent : serverRegistry) {
-            snapshot.WriteUInt32(ent.id);
-            snapshot.WriteFloat(ent.transform.x);
-            snapshot.WriteFloat(ent.transform.y);
-            snapshot.WriteFloat(ent.transform.z);
-            snapshot.WriteUInt32(static_cast<uint32_t>(ent.currentHP));
-            snapshot.WriteUInt32(static_cast<uint32_t>(ent.maxHP));
-            snapshot.WriteString(ent.name);
-            snapshot.WriteString(ent.render.materialId);
-        }
+    // FIX P2: Spatial Hash aktualisieren
+    if (snapshotBuilder && gEcsWorld) {
+        snapshotBuilder->UpdateSpatialHash(*gEcsWorld);
     }
 
-    // An alle Clients broadcasten
     std::lock_guard lock(sessionsMutex);
     for (const auto& [sessionId, session] : udpSessions) {
-        networkServer.SendReliable(
-            PacketHeader{.protocolId = 0x4D4D, .flags = static_cast<uint8_t>(PacketFlags::Reliable)},
-            std::span<const uint8_t>(snapshot.data.data(), snapshot.data.size()),
-            session.ip,
-            session.port
-        );
+        // FIX P2: Per-Client Snapshot mit Interest Management + Delta-Kompression
+        ByteBuffer snapshot;
+
+        if (snapshotBuilder && gEcsWorld) {
+            // Hole Client-Position aus ECS
+            float clientX = 0.0f, clientZ = 0.0f;
+            if (session.entityId != 0) {
+                auto query = gEcsWorld->Query<ecs::PositionComponent, ecs::LegacyIdComponent>();
+                for (auto [handle, pos, legacy] : query) {
+                    if (legacy && legacy->id == session.entityId) {
+                        clientX = pos->x;
+                        clientZ = pos->z;
+                        break;
+                    }
+                }
+            }
+
+            snapshot = snapshotBuilder->BuildSnapshot(
+                *gEcsWorld, sessionId, clientX, clientZ, 100.0f);
+        } else {
+            // Fallback: Legacy Broadcast
+            snapshot.WriteUInt8(std::to_underlying(PacketType::MSG_SNAPSHOT));
+            snapshot.WriteFloat(static_cast<float>(
+                std::chrono::duration<float>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()));
+            snapshot.WriteUInt32(static_cast<uint32_t>(serverRegistry.size()));
+            for (const auto& ent : serverRegistry) {
+                snapshot.WriteUInt32(ent.id);
+                snapshot.WriteFloat(ent.transform.x);
+                snapshot.WriteFloat(ent.transform.y);
+                snapshot.WriteFloat(ent.transform.z);
+                snapshot.WriteUInt32(static_cast<uint32_t>(ent.currentHP));
+                snapshot.WriteUInt32(static_cast<uint32_t>(ent.maxHP));
+                snapshot.WriteString(ent.name);
+                snapshot.WriteString(ent.render.materialId);
+            }
+        }
+
+        // FIX P5-1: Fragmentierte Snapshot-Übertragung
+        static uint32_t snapshotSequence = 0;
+        snapshotBuilder->SendFragmentedSnapshot(
+            networkServer, snapshot, ++snapshotSequence, session.ip, session.port);
     }
 }
 
-// =============================================================================
-// SESSION MANAGEMENT
-// =============================================================================
 uint32_t MultiThreadedServer::GetOrCreateSession(std::string_view ip, uint16_t port) {
     std::lock_guard lock(sessionsMutex);
 

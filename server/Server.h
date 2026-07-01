@@ -14,6 +14,8 @@
 #include "../ecs/ecs_EcsWorld.h"
 #include "../ecs/Components.h"
 
+namespace net { class SnapshotBuilder; }  // FIX P2: Forward declaration
+
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -25,6 +27,7 @@
 class MultiThreadedServer {
 private:
     net::NetworkServer networkServer;
+    std::unique_ptr<net::SnapshotBuilder> snapshotBuilder;  // FIX P2: Delta + Interest Management
     std::thread serverThread;
     std::atomic<bool> running{false};
 
@@ -39,6 +42,7 @@ private:
     };
     std::unordered_map<uint32_t, UdpClientSession> udpSessions;
     std::mutex sessionsMutex;
+    mutable std::shared_mutex componentMutex;  // FIX P1-2: RW-Lock für ECS-Komponenten
 
     // Snapshot-Builder
     std::vector<uint8_t> snapshotBuffer;

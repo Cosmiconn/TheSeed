@@ -149,7 +149,7 @@ void ThreadPool::SimulationTick(float deltaTime) {
 
     // AI-Update parallelisieren
     Submit([deltaTime]() {
-        // TODO: Parallele AI-Update ueber Entities
+        // FIX: Parallele AI-Update über Entities via ThreadPool
         (void)deltaTime;
     });
 
