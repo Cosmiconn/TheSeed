@@ -1,11 +1,18 @@
 // =============================================================================
-// main.cpp — C++23 MMORPG Engine V13.2 Entry Point (P1-FIX)
+// main.cpp — C++23 MMORPG Engine V13.2 Entry Point (P1-FIX + AP-81 + AP-91)
 // =============================================================================
 // KORREKTUR P1:
 // • ECS-Systeme werden NUR ueber gEcsWorld->Update() ausgefuehrt
 // • gThreadPool->ExecuteEcsSystems() entfernt (verursachte Race Condition)
 // • RegisterEcsSystems() wird in InitializeEcs() aufgerufen
-// • Korrekte Includes fuer <cmath>, <expected>, <format>
+// • Korrekte Includes fuer <cmath>, <expected>, <span>
+// KORREKTUR AP-81:
+// • NetworkProfiler-Initialisierung und Anzeige in Metrics-Panel
+// • Periodisches Profiling alle 5 Sekunden
+// KORREKTUR AP-91:
+// • MetricsDashboard-Integration als zentrales Monitoring-System
+// • F6-Taste fuer Dashboard-Toggle
+// • Entfernt duplizierte Metrics-Anzeige (ersetzt durch Dashboard)
 // =============================================================================
 #include "core/Types.h"
 #include "core/World.h"
@@ -18,23 +25,26 @@
 #include "ecs/ecs_EcsWorld.h"
 #include "ecs/ecs_Query.h"
 #include "network/network_NetworkServer.h"
+#include "network/NetworkProfiler.h"
 #include "server/Server.h"
 #include "server/ThreadPool.h"
 #include "client/Connection.h"
 #include "client/ClientTick.h"
 #include "client/Renderer.h"
 #include "editor/EditorRuntime.h"
+#include "metrics/MetricsDashboard.h"
 
+#include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
-#include <thread>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
 #include <cmath>       // FIX P1: Fuer std::sqrt in ECS-Systemen
 #include <expected>    // FIX P1: Fuer std::expected (C++23)
+#include <span>
+#include <memory>
+#include <thread>
 #include <chrono>
-#include <random>
-#include <fstream>
-#include <sstream>
-#include <filesystem>
 
 // =============================================================================
 // GLOBALE ZUSTAENDE
@@ -42,18 +52,22 @@
 bool gRunning = true;
 bool gUseEcs = true;
 bool gShowEditor = true;
-bool gShowMetrics = true;
+bool gShowMetrics = true;      // AP-91: Wird durch MetricsDashboard ersetzt
+bool gShowMetricsDashboard = false; // AP-91: Neues Dashboard-Fenster
 bool gShowDemo = false;
 bool gUseVulkan = false;
 bool gUseThreadPool = true;
 
 std::unique_ptr<ecs::EcsWorld> gEcsWorld;
-std::unique_ptr<server::MultiThreadedServer> gMultiServer;
+std::unique_ptr<net::NetworkServer> gMultiServer;
 std::unique_ptr<net::NetworkServer> gNetworkServer;
 std::unique_ptr<ThreadPool> gThreadPool;
 
 int gWindowWidth = 1280;
 int gWindowHeight = 720;
+
+// AP-81: NetworkProfiler-Timer
+std::chrono::steady_clock::time_point gLastNetProfileUpdate;
 
 // =============================================================================
 // GLFW CALLBACKS
@@ -70,12 +84,19 @@ static void GlfwKeyCallback(GLFWwindow* window, int key, int scancode, int actio
     if (key == GLFW_KEY_F1 && action == GLFW_PRESS)
         gShowEditor = !gShowEditor;
     if (key == GLFW_KEY_F2 && action == GLFW_PRESS)
-        gShowMetrics = !gShowMetrics;
+        gShowMetrics = !gShowMetrics; // Legacy-Metrics (kann entfernt werden)
+    // AP-91: F6 fuer Metrics Dashboard
+    if (key == GLFW_KEY_F6 && action == GLFW_PRESS)
+        gShowMetricsDashboard = !gShowMetricsDashboard;
     if (key == GLFW_KEY_F3 && action == GLFW_PRESS)
         gShowDemo = !gShowDemo;
     if (key == GLFW_KEY_F4 && action == GLFW_PRESS) {
         gUseEcs = !gUseEcs;
         AddLog("[Engine] ECS-Modus: {}", gUseEcs ? "AKTIV" : "LEGACY");
+    }
+    // AP-81: F5 fuer NetworkProfiler-Report
+    if (key == GLFW_KEY_F5 && action == GLFW_PRESS) {
+        net::NetworkProfiler::GetInstance().PrintReport();
     }
 
     if (serverRegistry.empty()) return;
@@ -134,9 +155,9 @@ static void RegisterEcsSystems() {
         for (auto [entity, health, combat] : query) {
             (void)entity;
             if (combat.incomingDamage > 0) {
-                health.currentHP -= combat.incomingDamage;
+                health.currentHP -= static_cast<int>(combat.incomingDamage);
                 AddLog("[ECS] Entity nimmt {} Schaden, HP={}/{}",
-                       combat.incomingDamage, health.currentHP, health.maxHP);
+                         combat.incomingDamage, health.currentHP, health.maxHP);
                 combat.incomingDamage = 0;
             }
         }
@@ -154,15 +175,15 @@ static void RegisterEcsSystems() {
 
                 if (effect.timeSinceLastTick >= 1.0f) {
                     effect.timeSinceLastTick -= 1.0f;
-                    health.currentHP -= effect.tickDamage;
+                    health.currentHP -= static_cast<int>(effect.tickDamage);
                     AddLog("[ECS] Entity: Status-Effekt '{}' tick, {} Schaden",
-                           static_cast<int>(effect.type), effect.tickDamage);
+                             static_cast<int>(effect.type), effect.tickDamage);
                 }
 
                 if (effect.remainingDuration <= 0.0f) {
                     effect.isActive = false;
                     AddLog("[ECS] Entity: Status-Effekt '{}' abgelaufen",
-                           static_cast<int>(effect.type));
+                             static_cast<int>(effect.type));
                 }
             }
             std::erase_if(status.effects, [](const auto& e) { return !e.isActive; });
@@ -253,7 +274,7 @@ static void SyncLegacyToEcs() {
         gEcsWorld->AddComponent(entity, ecs::ScaleComponent{1.0f, legacy.render.scaleY, 1.0f});
         gEcsWorld->AddComponent(entity, ecs::VelocityComponent{0.0f, 0.0f, 0.0f});
         gEcsWorld->AddComponent(entity, ecs::HealthComponent{
-            legacy.currentHP, legacy.maxHP, legacy.currentHP > 0
+            static_cast<int>(legacy.currentHP), static_cast<int>(legacy.maxHP), legacy.currentHP > 0
         });
         gEcsWorld->AddComponent(entity, ecs::NameComponent{legacy.name});
         gEcsWorld->AddComponent(entity, ecs::RenderComponentECS{
@@ -300,7 +321,16 @@ static bool InitEngine() {
     gThreadPool = std::make_unique<ThreadPool>(
         std::max(2u, std::thread::hardware_concurrency()));
     AddLog("[ThreadPool] {} Worker-Threads initialisiert",
-           std::max(2u, std::thread::hardware_concurrency()));
+             std::max(2u, std::thread::hardware_concurrency()));
+
+    // AP-81: NetworkProfiler initialisieren
+    net::NetworkProfiler::GetInstance().Initialize();
+    gLastNetProfileUpdate = std::chrono::steady_clock::now();
+    AddLog("[NetworkProfiler] Initialisiert — F5 fuer Report");
+
+    // AP-91: MetricsDashboard initialisieren
+    metrics::MetricsDashboard::GetInstance().Initialize();
+    AddLog("[MetricsDashboard] Initialisiert — F6 fuer Dashboard");
 
     return true;
 }
@@ -310,6 +340,12 @@ static bool InitEngine() {
 // =============================================================================
 static void ShutdownEngine() {
     gRunning = false;
+
+    // AP-91: MetricsDashboard herunterfahren
+    metrics::MetricsDashboard::GetInstance().Shutdown();
+
+    // AP-81: NetworkProfiler herunterfahren
+    net::NetworkProfiler::GetInstance().Shutdown();
 
     if (gMultiServer) gMultiServer->Stop();
     if (gNetworkServer) gNetworkServer->Stop();
@@ -340,7 +376,7 @@ int main(int argc, char* argv[]) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     GLFWwindow* window = glfwCreateWindow(gWindowWidth, gWindowHeight,
-        "TheSeed V13.2", nullptr, nullptr);
+                                          "TheSeed V13.2", nullptr, nullptr);
     if (!window) {
         AddLog("[GLFW] Fenstererstellung fehlgeschlagen!");
         glfwTerminate();
@@ -374,6 +410,10 @@ int main(int argc, char* argv[]) {
         float deltaTime = std::chrono::duration<float>(now - lastTime).count();
         lastTime = now;
         accumulator += deltaTime;
+
+        // AP-91: MetricsDashboard Update (jeden Frame)
+        float fps = (deltaTime > 0.0f) ? (1.0f / deltaTime) : 0.0f;
+        metrics::MetricsDashboard::GetInstance().Update(deltaTime, fps, 0);
 
         while (accumulator >= FIXED_DT) {
             if (!serverRegistry.empty()) {
@@ -416,30 +456,33 @@ int main(int argc, char* argv[]) {
             EditorFrame(window);
         }
 
+        // AP-91: Metrics Dashboard anzeigen
+        if (gShowMetricsDashboard) {
+            METRICS_RENDER_WINDOW(&gShowMetricsDashboard);
+        }
+
+        // AP-91: Legacy-Metrics-Panel (kann entfernt werden, Dashboard ersetzt es)
         if (gShowMetrics) {
-            ImGui::Begin("Engine Metrics", &gShowMetrics);
-            ImGui::Text("FPS: %.1f", 1.0f / deltaTime);
+            ImGui::Begin("Engine Metrics (Legacy)", &gShowMetrics);
+            ImGui::Text("FPS: %.1f", fps);
             ImGui::Text("Delta: %.3f ms", deltaTime * 1000.0f);
             ImGui::Text("Entities (Legacy): %zu", serverRegistry.size());
             if (gEcsWorld) {
                 ImGui::Text("Entities (ECS): %zu", gEcsWorld->GetEntityCount());
-                ImGui::Text("Archetypes: %zu", gEcsWorld->GetArchetypeCount());
-                ImGui::Text("Chunks: %zu", gEcsWorld->GetTotalChunkCount());
-                ImGui::Text("ECS Memory: %.2f MB", gEcsWorld->GetTotalMemoryUsage() / (1024.0f * 1024.0f));
             }
-            ImGui::Text("ECS-Modus: %s", gUseEcs ? "AKTIV" : "LEGACY");
-            if (gNetworkServer) {
-                ImGui::Text("Net Clients: %u", gNetworkServer->GetClientCount());
-            }
-            if (gThreadPool) {
-                ImGui::Text("ThreadPool Tasks: %zu", gThreadPool->GetPendingCount());
-                ImGui::Text("Avg Task Time: %.2f us", gThreadPool->GetAverageTaskTimeUs());
-            }
+            ImGui::Text("F6 fuer neues Dashboard");
             ImGui::End();
         }
 
         if (gShowDemo) {
             ImGui::ShowDemoWindow(&gShowDemo);
+        }
+
+        // AP-81: Periodisches Network-Profiling (alle 5 Sekunden)
+        auto netNow = std::chrono::steady_clock::now();
+        if (std::chrono::duration<float>(netNow - gLastNetProfileUpdate).count() >= 5.0f) {
+            NETPROFILE_RECORD_SNAPSHOT();
+            gLastNetProfileUpdate = netNow;
         }
 
         glfwSwapBuffers(window);
