@@ -1,25 +1,28 @@
 #pragma once
 // =============================================================================
-// network/network_NetworkServer.h — High-Level Network Server (P2-FIX)
+// network/network_NetworkServer.h — High-Level Network Server (P2-FIX + AP-81)
 // =============================================================================
 // KORREKTUR P2:
-// • SendFragmented() für MTU-konforme Pakete
-// • ProcessFragment() für Reassembly
-// • ProcessReceiveQueue() für Empfangs-Queue-Verarbeitung
+// • SendFragmented() fuer MTU-konforme Pakete
+// • ProcessFragment() fuer Reassembly
+// • ProcessReceiveQueue() fuer Empfangs-Queue-Verarbeitung
+// KORREKTUR AP-81:
+// • NetworkProfiler-Integration fuer Metrik-Tracking
 // =============================================================================
 #include "network_UdpSocket.h"
 #include "network_ReliableUdp.h"
+#include "NetworkProfiler.h"
 #include "../core/Types.h"
 
-#include <span>
-#include <vector>
+#include <cstdint>
 #include <string>
+#include <vector>
+#include <span>
 #include <unordered_map>
 #include <mutex>
-#include <chrono>
+#include <memory>
 #include <functional>
-#include <deque>
-#include <atomic>
+#include <chrono>
 
 namespace net {
 
@@ -53,7 +56,7 @@ struct ClientConnection {
     NetworkAddress address{};
     std::chrono::steady_clock::time_point connectedTime;
     std::chrono::steady_clock::time_point lastActivity;
-    std::unique_ptr<class ReliableUdpChannel> reliableChannel;
+    std::unique_ptr<RttEstimator> reliableChannel;
     bool authenticated = false;
     std::string playerName;
 };
@@ -66,8 +69,8 @@ public:
     static constexpr uint32_t INVALID_CLIENT_ID = 0xFFFFFFFF;
     static constexpr uint32_t MAX_RETRIES = 5;
 
-    using PacketCallback = std::function<void(const PacketHeader&, std::span<const uint8_t>,
-                                              std::string_view, uint16_t)>;
+    using PacketCallback = std::function<void(const PacketHeader&, std::span<uint8_t>,
+                                               std::string_view, uint16_t)>;
 
     NetworkServer();
     ~NetworkServer();
@@ -97,13 +100,13 @@ public:
     // ===================================================================
     // Senden
     // ===================================================================
-    void SendPacket(const PacketHeader& header, std::span<const uint8_t> payload,
+    void SendPacket(const PacketHeader& header, std::span<uint8_t> payload,
                     std::string_view ip, uint16_t port);
-    void SendReliable(const PacketHeader& header, std::span<const uint8_t> payload,
+    void SendReliable(const PacketHeader& header, std::span<uint8_t> payload,
                       std::string_view ip, uint16_t port);
 
-    // P2-FIX: Fragmentierte Sendung für große Pakete
-    void SendFragmented(const PacketHeader& header, std::span<const uint8_t> payload,
+    // P2-FIX: Fragmentierte Sendung fuer grosse Pakete
+    void SendFragmented(const PacketHeader& header, std::span<uint8_t> payload,
                         std::string_view ip, uint16_t port);
 
     // ===================================================================
@@ -118,6 +121,10 @@ public:
     [[nodiscard]] uint32_t GetClientCount() const { return static_cast<uint32_t>(clients.size()); }
     [[nodiscard]] float GetAverageRtt() const;
 
+    // AP-81: NetworkProfiler-Integration
+    void InitializeProfiler();
+    void ShutdownProfiler();
+
 private:
     UdpSocket udpSocket;
     std::unordered_map<uint32_t, ClientConnection> clients;
@@ -130,11 +137,11 @@ private:
     uint32_t nextClientId = 1;
     bool running = false;
 
-    void QueueReliablePacket(uint16_t sequence, std::span<const uint8_t> payload,
+    void QueueReliablePacket(uint16_t sequence, std::span<uint8_t> payload,
                              std::string_view ip, uint16_t port);
 
     // P2-FIX: Fragment-Verarbeitung
-    void ProcessFragment(const PacketHeader& header, std::span<const uint8_t> payload,
+    void ProcessFragment(const PacketHeader& header, std::span<uint8_t> payload,
                          std::string_view ip, uint16_t port);
 };
 
