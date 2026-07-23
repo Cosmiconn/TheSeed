@@ -1,0 +1,75 @@
+# Build artifacts and cache directories
+build/
+out/
+cmake-build-*/
+.cache/
+.ccache/
+
+# vcpkg
+vcpkg/
+vcpkg_installed/
+vcpkg-configuration.json
+
+# IDE
+.idea/
+.vscode/
+*.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf
+ipch/
+.vs/
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Test results
+Testing/
+test-results/
+*.log
+
+# Coverage
+*.gcov
+*.gcda
+*.gcno
+coverage/
+
+# Tracy captures
+*.tracy
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*~
+.sw
+.swo
+*.bak
