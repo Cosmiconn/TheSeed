@@ -1,0 +1,12 @@
+{
+  "name": "theseed",
+  "version": "0.1.0",
+  "dependencies": [
+    "doctest",
+    "spdlog",
+    "fmt",
+    "nlohmann-json",
+    "tracy",
+    "glm"
+  ]
+}

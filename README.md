@@ -1,2 +1,1 @@
-# TheSeed
-Meta-Repo
+# TheSeed - Meta-Repo (v4.0 Solo-to-AAA Engine)
