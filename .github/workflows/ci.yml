@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        compiler: [gcc-13, clang-18]
+        build_type: [Release, Debug]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2024.06.15'
+
+      - name: Configure
+        run: |
+          PRESET="linux-$(echo ${{ matrix.build_type }} | tr '[:upper:]' '[:lower:]')"
+          cmake --preset "$PRESET"
+
+      - name: Build
+        run: cmake --build build/linux-$(echo ${{ matrix.build_type }} | tr '[:upper:]' '[:lower:]') --parallel
+
+      - name: Test
+        run: |
+          PRESET="linux-$(echo ${{ matrix.build_type }} | tr '[:upper:]' '[:lower:]')"
+          ctest --test-dir "build/$PRESET" --output-on-failure -j$(nproc)
+
+  build-windows:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        build_type: [Release, Debug]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2024.06.15'
+
+      - name: Configure
+        run: |
+          $preset = "windows-${{ matrix.build_type }}".ToLower()
+          cmake --preset $preset
+
+      - name: Build
+        run: |
+          $preset = "windows-${{ matrix.build_type }}".ToLower()
+          cmake --build build/$preset --parallel
+
+      - name: Test
+        run: |
+          $preset = "windows-${{ matrix.build_type }}".ToLower()
+          ctest --test-dir build/$preset --output-on-failure -j$env:NUMBER_OF_PROCESSORS
