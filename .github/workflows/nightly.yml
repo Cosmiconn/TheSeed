@@ -1,0 +1,64 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2024.06.15'
+
+      - name: Build with Sanitizers
+        run: |
+          cmake --preset linux-debug
+          cmake --build build/linux-debug --parallel
+
+      - name: Run Sanitizer Tests
+        run: ctest --test-dir build/linux-debug --output-on-failure
+
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build lcov
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2024.06.15'
+
+      - name: Build with Coverage
+        run: |
+          cmake --preset linux-debug
+          cmake --build build/linux-debug --parallel
+
+      - name: Run Tests with Coverage
+        run: |
+          ctest --test-dir build/linux-debug --output-on-failure
+          lcov --capture --directory build/linux-debug --output-file coverage.info
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.info
