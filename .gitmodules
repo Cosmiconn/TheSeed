@@ -1,0 +1,3 @@
+[submodule "submodules/seed-core"]
+	path = submodules/seed-core
+	url = https://github.com/cosmiconn/seed-core.git
