@@ -26,7 +26,7 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: '2024.06.15'
+          vcpkgGitCommitId: 'dfcb04008a5a9e038a4ae0d1af57909e30d21359'
 
       - name: Configure
         run: |
@@ -54,19 +54,22 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: '2024.06.15'
+          vcpkgGitCommitId: 'dfcb04008a5a9e038a4ae0d1af57909e30d21359'
 
       - name: Configure
+        shell: pwsh
         run: |
           $preset = "windows-${{ matrix.build_type }}".ToLower()
           cmake --preset $preset
 
       - name: Build
+        shell: pwsh
         run: |
           $preset = "windows-${{ matrix.build_type }}".ToLower()
           cmake --build build/$preset --parallel
 
       - name: Test
+        shell: pwsh
         run: |
           $preset = "windows-${{ matrix.build_type }}".ToLower()
           ctest --test-dir build/$preset --output-on-failure -j$env:NUMBER_OF_PROCESSORS
