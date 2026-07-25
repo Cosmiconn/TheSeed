@@ -1,0 +1,42 @@
+name: Submodule Auto-Update
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update-submodules:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update submodules
+        run: |
+          git submodule update --remote
+          git diff --submodules > submodule_changes.txt
+          if [ -s submodule_changes.txt ]; then
+            echo "Submodules updated:"
+            cat submodule_changes.txt
+            git add -A
+            git checkout -b "chore/update-submodules-$(date +%Y%m%d)"
+            git commit -m "chore(submodules): Weekly submodule update $(date +%Y-%m-%d)"
+            git push origin "chore/update-submodules-$(date +%Y%m%d)"
+          else
+            echo "No submodule updates available"
+          fi
+
+      - name: Create PR
+        if: success()
+        uses: peter-evans/create-pull-request@v7
+        with:
+          title: "chore(submodules): Weekly submodule update"
+          body: "Automated submodule update. Please review before merging."
+          branch: "chore/update-submodules-$(date +%Y%m%d)"
+          base: develop

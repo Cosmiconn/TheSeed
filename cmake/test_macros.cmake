@@ -1,0 +1,20 @@
+# test_macros.cmake – Shared test helpers for TheSeed meta-repo and submodules
+include_guard(GLOBAL)
+
+function(seed_add_test_executable target)
+  find_package(doctest CONFIG REQUIRED)
+  add_executable(${target} ${ARGN})
+  target_link_libraries(${target} PRIVATE seed_core doctest::doctest)
+  seed_apply_warnings(${target})
+  if(SEED_ENABLE_SANITIZERS)
+    seed_apply_sanitizers(${target})
+  endif()
+  include(doctest)
+  doctest_discover_tests(${target})
+endfunction()
+
+function(seed_add_benchmark_executable target)
+  add_executable(${target} ${ARGN})
+  target_link_libraries(${target} PRIVATE seed_core)
+  seed_apply_warnings(${target})
+endfunction()

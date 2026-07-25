@@ -1,0 +1,94 @@
+name: Nightly Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+jobs:
+  nightly-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck valgrind
+
+      - name: Clone vcpkg
+        run: |
+          if [ ! -d "$VCPKG_ROOT/.git" ]; then
+            rm -rf "$VCPKG_ROOT"
+            git clone https://github.com/Microsoft/vcpkg.git "$VCPKG_ROOT"
+          fi
+
+      - name: Bootstrap vcpkg
+        run: |
+          cd "$VCPKG_ROOT"
+          if [ ! -f "./vcpkg" ]; then
+            ./bootstrap-vcpkg.sh
+          fi
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/installed
+            ${{ github.workspace }}/vcpkg/downloads
+          key: vcpkg-linux-${{ hashFiles('vcpkg.json') }}
+
+      - name: vcpkg install
+        run: "$VCPKG_ROOT/vcpkg" install --triplet=x64-linux
+
+      - name: Configure Debug with Sanitizers
+        run: |
+          cmake -S . -B build/linux-debug \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DSEED_ENABLE_SANITIZERS=ON \
+            -DBUILD_TESTING=ON
+
+      - name: Build Debug
+        run: cmake --build build/linux-debug --parallel
+
+      - name: Run all tests
+        run: ctest --test-dir build/linux-debug --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:print_stats=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+      - name: Stress Tests x20
+        run: |
+          export ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          for i in $(seq 1 20); do
+            echo "=== Stress run $i ==="
+            ctest --test-dir build/linux-debug -R "Stress|stress" --output-on-failure
+          done
+
+      - name: Valgrind Memory Check
+        run: |
+          ctest --test-dir build/linux-debug -N | grep -oP "Test #[0-9]+: \K[^ ]+" | while read test; do
+            echo "=== Valgrind: $test ==="
+            valgrind --leak-check=full --error-exitcode=1 \
+              ./build/linux-debug/submodules/seed-core/tests/seed_tests -tc="$test" || true
+          done
+
+      - name: Static Analysis – clang-tidy
+        run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/ || true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: TheSeed-Nightly-Linux
+          path: build/linux-debug/submodules/seed-core/tests/seed_tests

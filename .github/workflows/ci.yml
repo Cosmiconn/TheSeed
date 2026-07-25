@@ -1,0 +1,232 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck
+
+      - name: Clone vcpkg
+        run: |
+          if [ ! -d "$VCPKG_ROOT/.git" ]; then
+            rm -rf "$VCPKG_ROOT"
+            git clone https://github.com/Microsoft/vcpkg.git "$VCPKG_ROOT"
+          fi
+
+      - name: Bootstrap vcpkg
+        run: |
+          cd "$VCPKG_ROOT"
+          if [ ! -f "./vcpkg" ]; then
+            ./bootstrap-vcpkg.sh
+          fi
+          ./vcpkg --version
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/installed
+            ${{ github.workspace }}/vcpkg/downloads
+          key: vcpkg-linux-${{ hashFiles('vcpkg.json') }}
+
+      - name: vcpkg install
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet=x64-linux
+
+      - name: Verify vcpkg packages
+        run: |
+          "$VCPKG_ROOT/vcpkg" list
+
+      - name: Configure Release
+        run: |
+          cmake -S . -B build/linux-release \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=ON
+
+      - name: Build Release
+        run: cmake --build build/linux-release --parallel
+
+      - name: Configure Debug
+        run: |
+          cmake -S . -B build/linux-debug \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DSEED_ENABLE_SANITIZERS=ON \
+            -DBUILD_TESTING=ON
+
+      - name: Build Debug
+        run: cmake --build build/linux-debug --parallel
+
+      - name: List all tests
+        run: ctest --test-dir build/linux-debug -N
+
+      - name: Test (all)
+        run: ctest --test-dir build/linux-debug --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:print_stats=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+      - name: Stress Test – MultiThreadStress x10
+        run: |
+          export ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          for i in $(seq 1 10); do
+            echo "=== MultiThreadStress run $i ==="
+            ctest --test-dir build/linux-debug -R Integration_MultiThreadStress --output-on-failure
+          done
+
+      - name: Stress Test – 100kEntities x10
+        run: |
+          export ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          for i in $(seq 1 10); do
+            echo "=== 100kEntities run $i ==="
+            ctest --test-dir build/linux-debug -R Integration_100kEntities_Stress --output-on-failure
+          done
+
+      - name: Static Analysis – clang-tidy
+        run: run-clang-tidy -p build/linux-debug src/ tests/ || true
+
+      - name: Static Analysis – cppcheck
+        run: |
+          cppcheck --enable=all \
+            -I src \
+            --suppress=missingIncludeSystem \
+            --suppress=missingInclude \
+            --suppress=unusedFunction \
+            --suppress=constVariablePointer \
+            --suppress=knownConditionTrueFalse \
+            --error-exitcode=0 \
+            src/ tests/ || true
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Clone vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgPath = "$env:VCPKG_ROOT"
+          if (-not (Test-Path "$vcpkgPath/.git")) {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $vcpkgPath
+            git clone https://github.com/Microsoft/vcpkg.git $vcpkgPath
+          }
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          cd "$env:VCPKG_ROOT"
+          if (-not (Test-Path "vcpkg.exe")) {
+            .\bootstrap-vcpkg.bat
+          }
+          .\vcpkg.exe --version
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/installed
+            ${{ github.workspace }}/vcpkg/downloads
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
+
+      - name: vcpkg install
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT/vcpkg.exe" install --triplet=x64-windows
+
+      - name: Verify vcpkg packages
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT/vcpkg.exe" list
+
+      - name: Configure Release
+        shell: pwsh
+        run: |
+          $toolchain = "$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -S . -B build/windows-release `
+            -G "Ninja Multi-Config" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DBUILD_TESTING=ON
+
+      - name: Build Release
+        run: cmake --build build/windows-release --config Release --parallel
+
+      - name: Configure Debug
+        shell: pwsh
+        run: |
+          $toolchain = "$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -S . -B build/windows-debug `
+            -G "Ninja Multi-Config" `
+            -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DSEED_ENABLE_SANITIZERS=ON `
+            -DBUILD_TESTING=ON
+
+      - name: Build Debug
+        run: cmake --build build/windows-debug --config Debug --parallel
+
+      - name: List all tests
+        run: ctest --test-dir build/windows-debug -C Debug -N
+
+      - name: Test (all) with Runtime Checks
+        run: ctest --test-dir build/windows-debug -C Debug --output-on-failure
+
+      - name: Stress Test – MultiThreadStress x10
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 10; $i++) {
+            Write-Host "=== MultiThreadStress run $i ==="
+            ctest --test-dir build/windows-debug -C Debug -R Integration_MultiThreadStress --output-on-failure
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Stress Test – 100kEntities x10
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 10; $i++) {
+            Write-Host "=== 100kEntities run $i ==="
+            ctest --test-dir build/windows-debug -C Debug -R Integration_100kEntities_Stress --output-on-failure
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: TheSeed-Windows
+          path: |
+            build/windows-release/Release/*.exe
+            build/windows-release/Release/*.dll

@@ -1,0 +1,141 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+jobs:
+  release-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-13
+
+      - name: Clone vcpkg
+        run: |
+          if [ ! -d "$VCPKG_ROOT/.git" ]; then
+            rm -rf "$VCPKG_ROOT"
+            git clone https://github.com/Microsoft/vcpkg.git "$VCPKG_ROOT"
+          fi
+          cd "$VCPKG_ROOT"
+          if [ ! -f "./vcpkg" ]; then
+            ./bootstrap-vcpkg.sh
+          fi
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/installed
+            ${{ github.workspace }}/vcpkg/downloads
+          key: vcpkg-linux-release-${{ hashFiles('vcpkg.json') }}
+
+      - name: vcpkg install
+        run: "$VCPKG_ROOT/vcpkg" install --triplet=x64-linux
+
+      - name: Configure Release
+        run: |
+          cmake -S . -B build/linux-release \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=OFF
+
+      - name: Build Release
+        run: cmake --build build/linux-release --parallel
+
+      - name: Package
+        run: |
+          mkdir -p dist/TheSeed-linux
+          cp -r build/linux-release/submodules/seed-core/libseed_core.a dist/TheSeed-linux/
+          cp -r submodules/seed-core/src/public dist/TheSeed-linux/include
+          tar czf TheSeed-linux.tar.gz -C dist TheSeed-linux
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TheSeed-linux.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Clone vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgPath = "$env:VCPKG_ROOT"
+          if (-not (Test-Path "$vcpkgPath/.git")) {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $vcpkgPath
+            git clone https://github.com/Microsoft/vcpkg.git $vcpkgPath
+          }
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          cd "$env:VCPKG_ROOT"
+          if (-not (Test-Path "vcpkg.exe")) {
+            .\bootstrap-vcpkg.bat
+          }
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/installed
+            ${{ github.workspace }}/vcpkg/downloads
+          key: vcpkg-windows-release-${{ hashFiles('vcpkg.json') }}
+
+      - name: vcpkg install
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT/vcpkg.exe" install --triplet=x64-windows
+
+      - name: Configure Release
+        shell: pwsh
+        run: |
+          $toolchain = "$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -S . -B build/windows-release `
+            -G "Ninja Multi-Config" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DBUILD_TESTING=OFF
+
+      - name: Build Release
+        run: cmake --build build/windows-release --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\TheSeed-windows
+          Copy-Item build\windows-release\submodules\seed-core\seed_core.lib dist\TheSeed-windows\
+          Copy-Item -Recurse submodules\seed-core\src\public dist\TheSeed-windows\include
+          Compress-Archive -Path dist\TheSeed-windows -DestinationPath TheSeed-windows.zip
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TheSeed-windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
