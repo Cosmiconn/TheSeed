@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 # TheSeed Auto-Sync Daemon: Local -> GitHub
 # Pushes local changes to GitHub every 5 minutes.
-# Also pulls from GitHub afterwards to stay in sync with remote.
+# Also pulls from GitHub afterwards to stay in sync.
 # Usage: Right-click -> "Run with PowerShell" or double-click start-local-to-github.cmd
 
 param(
@@ -10,7 +10,8 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$root = Split-Path $PSScriptRoot -Parent
+# Go TWO levels up: scripts/sync/ -> scripts/ -> TheSeed/
+$root = Resolve-Path (Join-Path $PSScriptRoot "..\..") | Select-Object -ExpandProperty Path
 $logPath = Join-Path $root $LogFile
 $lockFile = Join-Path $root ".auto-sync-local.lock"
 
@@ -27,6 +28,7 @@ if (Test-Path $lockFile) {
 
 $PID | Set-Content $lockFile
 Write-Host "Local-to-GitHub sync started (PID: $PID). Press Ctrl+C or close window to stop." -ForegroundColor Green
+Write-Host "Root: $root" -ForegroundColor Gray
 Write-Host "Mode: Local -> GitHub (push priority)" -ForegroundColor Cyan
 Write-Host "Logging to: $logPath" -ForegroundColor Gray
 Write-Host ""

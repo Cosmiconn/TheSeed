@@ -10,7 +10,8 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$root = Split-Path $PSScriptRoot -Parent
+# Go TWO levels up: scripts/sync/ -> scripts/ -> TheSeed/
+$root = Resolve-Path (Join-Path $PSScriptRoot "..\..") | Select-Object -ExpandProperty Path
 $logPath = Join-Path $root $LogFile
 $lockFile = Join-Path $root ".auto-sync.lock"
 
@@ -18,15 +19,16 @@ $lockFile = Join-Path $root ".auto-sync.lock"
 if (Test-Path $lockFile) {
     $pidOld = Get-Content $lockFile -ErrorAction SilentlyContinue
     if ($pidOld -and (Get-Process -Id $pidOld -ErrorAction SilentlyContinue)) {
-        Write-Host "Auto-sync already running (PID: $pidOld)" -ForegroundColor Red
-        Write-Host "Use stop-auto-sync.cmd to stop it first." -ForegroundColor Yellow
+        Write-Host "GitHub->Local sync already running (PID: $pidOld)" -ForegroundColor Red
+        Write-Host "Use stop-github-to-local.cmd to stop it first." -ForegroundColor Yellow
         pause
         exit 1
     }
 }
 
 $PID | Set-Content $lockFile
-Write-Host "Auto-sync started (PID: $PID). Press Ctrl+C or close window to stop." -ForegroundColor Green
+Write-Host "GitHub->Local sync started (PID: $PID). Press Ctrl+C or close window to stop." -ForegroundColor Green
+Write-Host "Root: $root" -ForegroundColor Gray
 Write-Host "Mode: GitHub -> Local (pull priority)" -ForegroundColor Cyan
 Write-Host "Logging to: $logPath" -ForegroundColor Gray
 Write-Host ""
@@ -49,7 +51,7 @@ Set-Location $root
 
 while ($true) {
     try {
-        Write-Log "========== SYNC CYCLE START =========="
+        Write-Log "========== GITHUB->LOCAL SYNC START =========="
 
         # 1. Pull main repo (GitHub -> Local)
         Write-Log "Pulling TheSeed from GitHub..."
@@ -97,7 +99,7 @@ while ($true) {
             Write-Log "Nothing to push" "SKIP"
         }
 
-        Write-Log "========== SYNC CYCLE COMPLETE =========="
+        Write-Log "========== GITHUB->LOCAL SYNC COMPLETE =========="
     }
     catch {
         Write-Log "Unexpected error: $_" "ERROR"
