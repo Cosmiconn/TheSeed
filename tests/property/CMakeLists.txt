@@ -4,7 +4,7 @@
 
 find_package(doctest CONFIG REQUIRED)
 
-add_executable(seed_property_tests
+add_executable(seed_meta_property_tests
     test_property_math.cpp
     test_property_random.cpp
     test_property_ecs.cpp
