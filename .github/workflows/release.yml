@@ -15,6 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN }}
 
       - name: Install dependencies
         run: |
@@ -76,6 +77,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN }}
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
