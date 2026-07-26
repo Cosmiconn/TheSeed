@@ -1,6 +1,6 @@
 [submodule "submodules/seed-core"]
 	path = submodules/seed-core
-	url = https://github.com/theseed/seed-core.git
+	url = https://github.com/Cosmiconn/seed-core.git
 [submodule "submodules/seed-network"]
 	path = submodules/seed-network
 	url = https://github.com/theseed/seed-network.git
