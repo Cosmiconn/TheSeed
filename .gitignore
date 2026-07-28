@@ -15,4 +15,3 @@ Thumbs.db
 *.so
 *.a
 *.lib
-CMakePresets.json
