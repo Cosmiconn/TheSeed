@@ -2,6 +2,7 @@ build/
 out/
 cmake-build-*/
 .vscode/
+.vs/
 .idea/
 *.user
 vcpkg_installed/
