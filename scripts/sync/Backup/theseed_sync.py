@@ -336,42 +336,6 @@ def auto_sync(repo_root: Path, submodules: List[Dict], interval_min: int):
         log("INFO", "Auto-Sync stopped by user")
 
 
-def build_project(repo_root: Path, preset: str) -> bool:
-    log("INFO", f"=== BUILD: {preset} ===")
-    rc, out, err = run(["cmake", "--preset", preset], repo_root, check=False)
-    if rc != 0:
-        log("ERROR", f"CMake configure failed for preset '{preset}'")
-        return False
-    build_dir = repo_root / "build" / preset.replace("-", "_")
-    rc, out, err = run(["cmake", "--build", str(build_dir), "--parallel"],
-                       repo_root, check=False, timeout=600)
-    if rc == 0:
-        log("OK", f"Build complete: {preset}")
-        return True
-    else:
-        log("ERROR", f"Build failed: {preset}")
-        return False
-
-
-def run_tests(repo_root: Path, preset: str, test_filter: str) -> bool:
-    log("INFO", f"=== TEST: {test_filter} (preset: {preset}) ===")
-    build_dir = repo_root / "build" / preset.replace("-", "_")
-    if not build_dir.exists():
-        log("WARN", f"Build dir not found: {build_dir}. Run build first.")
-        return False
-    regex = ".*" if test_filter == "all" else test_filter
-    rc, out, err = run(
-        ["ctest", "--test-dir", str(build_dir), "-R", regex,
-         "--output-on-failure", "-j", str(os.cpu_count() or 4)],
-        repo_root, check=False, timeout=300)
-    if rc == 0:
-        log("OK", f"Tests passed: {test_filter}")
-        return True
-    else:
-        log("ERROR", f"Tests failed: {test_filter}")
-        return False
-
-
 def main():
     parser = argparse.ArgumentParser(description="TheSeed Submodule Sync Tool")
     parser.add_argument("--fix-gitmodules", action="store_true", help="Add branch = main")
@@ -382,16 +346,6 @@ def main():
     parser.add_argument("--auto-sync", action="store_true", help="Run sync in loop")
     parser.add_argument("--interval", type=int, default=5, help="Auto-sync interval (min)")
     parser.add_argument("--gui", action="store_true", help="Launch GUI")
-    parser.add_argument("--build", action="store_true", help="Build project")
-    parser.add_argument("--preset", default="linux-release",
-                        choices=["linux-release", "linux-debug", "linux-debug-sanitizer", "windows-release"],
-                        help="CMake preset (default: linux-release)")
-    parser.add_argument("--test", action="store_true", help="Run tests")
-    parser.add_argument("--test-filter", default="all",
-                        choices=["all", "unit", "integration", "property", "fuzz", "benchmark",
-                                 "gate_p0", "gate_p1", "gate_p2", "gate_p3",
-                                 "gate_p4", "gate_p5", "gate_p6", "gate_p7"],
-                        help="Test filter (default: all)")
 
     args = parser.parse_args()
 
@@ -429,12 +383,6 @@ def main():
 
     if args.auto_sync:
         auto_sync(repo_root, submodules, args.interval)
-
-    if args.build:
-        build_project(repo_root, args.preset)
-
-    if args.test:
-        run_tests(repo_root, args.preset, args.test_filter)
 
 
 if __name__ == "__main__":

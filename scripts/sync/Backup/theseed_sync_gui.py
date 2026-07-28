@@ -122,36 +122,6 @@ class SubmoduleSyncGUI:
             fg="#888888", font=("Segoe UI", 9, "italic"))
         self.lbl_status.pack(side="right", padx=10)
 
-        # === BUILD & TEST CONTROLS ===
-        bt_frame = Frame(self.root, bg="#16213e", padx=10, pady=6)
-        bt_frame.pack(fill="x")
-
-        Label(bt_frame, text="Build:", bg="#16213e", fg="#a0a0a0",
-              font=("Segoe UI", 9, "bold")).pack(side="left")
-        self.preset_var = StringVar(value="linux-release")
-        self.cmb_preset = ttk.Combobox(bt_frame, textvariable=self.preset_var,
-            values=["linux-release", "linux-debug", "linux-debug-sanitizer", "windows-release"],
-            width=22, state="readonly")
-        self.cmb_preset.pack(side="left", padx=(4, 12))
-
-        Button(bt_frame, text="Build", bg="#f72585", fg="white",
-               command=self.on_build, font=("Segoe UI", 9, "bold"),
-               padx=14, pady=3, bd=0, cursor="hand2").pack(side="left", padx=2)
-
-        Label(bt_frame, text="Test:", bg="#16213e", fg="#a0a0a0",
-              font=("Segoe UI", 9, "bold")).pack(side="left", padx=(20, 0))
-        self.test_var = StringVar(value="all")
-        self.cmb_test = ttk.Combobox(bt_frame, textvariable=self.test_var,
-            values=["all", "unit", "integration", "property", "fuzz", "benchmark",
-                    "gate_p0", "gate_p1", "gate_p2", "gate_p3",
-                    "gate_p4", "gate_p5", "gate_p6", "gate_p7"],
-            width=18, state="readonly")
-        self.cmb_test.pack(side="left", padx=(4, 12))
-
-        Button(bt_frame, text="Run Tests", bg="#7209b7", fg="white",
-               command=self.on_test, font=("Segoe UI", 9, "bold"),
-               padx=14, pady=3, bd=0, cursor="hand2").pack(side="left", padx=2)
-
         # === SUBMODULE TABLE ===
         table_frame = Frame(self.root, padx=10, pady=5)
         table_frame.pack(fill="both", expand=True)
@@ -225,12 +195,12 @@ class SubmoduleSyncGUI:
         self.txt_log.see(END)
         self.txt_log.update()
 
-    def _run(self, cmd, cwd, check=False, silent=False, timeout=60) -> tuple:
+    def _run(self, cmd, cwd, check=False, silent=False) -> tuple:
         if not silent:
             self.log("CMD", f"{' '.join(cmd)}  (in {cwd})")
         try:
-            result = subprocess.run(cmd, cwd=cwd, capture_output=True,
-                                   text=True, check=False, timeout=timeout)
+            result = subprocess.run(cmd, cwd=cwd, capture_output=True, 
+                                   text=True, check=False, timeout=60)
             if result.stdout and not silent:
                 for line in result.stdout.strip().splitlines():
                     self.log("INFO", f"  > {line}")
@@ -242,7 +212,7 @@ class SubmoduleSyncGUI:
                         self.log("INFO", f"  ! {line}")
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
-            self.log("ERROR", f"  X Command timed out after {timeout}s")
+            self.log("ERROR", f"  X Command timed out after 60s")
             return 1, "", "timeout"
         except Exception as e:
             self.log("ERROR", f"  X Exception: {e}")
@@ -335,8 +305,6 @@ class SubmoduleSyncGUI:
                 for c in child.winfo_children():
                     if isinstance(c, Button):
                         c.configure(state=state)
-                    elif isinstance(c, ttk.Combobox):
-                        c.configure(state="disabled" if busy else "readonly")
         if busy:
             self.progress.start()
             self.lbl_status.configure(text="Working...", fg="#ff9f1c")
@@ -645,69 +613,6 @@ class SubmoduleSyncGUI:
             while slept < interval and self.auto_sync_active:
                 time.sleep(1)
                 slept += 1
-
-    # ============ BUILD & TEST ============
-
-    def on_build(self):
-        self._thread(self._build)
-
-    def _build(self):
-        preset = self.preset_var.get()
-        self.log("INFO", f"=== BUILD: {preset} ===")
-
-        build_dir = self.repo_root / "build" / preset.replace("-", "_")
-        build_dir.mkdir(parents=True, exist_ok=True)
-
-        # Configure
-        self.log("INFO", f"Configuring with preset: {preset}")
-        rc, out, err = self._run(
-            ["cmake", "--preset", preset],
-            self.repo_root, check=False)
-        if rc != 0:
-            self.log("ERROR", f"CMake configure failed for preset '{preset}'")
-            return
-
-        # Build
-        self.log("INFO", "Building...")
-        rc, out, err = self._run(
-            ["cmake", "--build", f"build/{preset.replace('-', '_')}", "--parallel"],
-            self.repo_root, check=False, timeout=600)
-        if rc == 0:
-            self.log("OK", f"Build complete: {preset}")
-        else:
-            self.log("ERROR", f"Build failed: {preset}")
-
-    def on_test(self):
-        self._thread(self._test)
-
-    def _test(self):
-        test_filter = self.test_var.get()
-        preset = self.preset_var.get()
-        build_dir = self.repo_root / "build" / preset.replace("-", "_")
-
-        self.log("INFO", f"=== TEST: {test_filter} (preset: {preset}) ===")
-
-        if not build_dir.exists():
-            self.log("WARN", f"Build dir not found: {build_dir}. Run Build first.")
-            return
-
-        if test_filter == "all":
-            regex = ".*"
-        elif test_filter.startswith("gate_"):
-            regex = test_filter
-        else:
-            regex = test_filter
-
-        self.log("INFO", f"Running ctest -R '{regex}'")
-        rc, out, err = self._run(
-            ["ctest", "--test-dir", str(build_dir),
-             "-R", regex, "--output-on-failure", "-j", str(os.cpu_count() or 4)],
-            self.repo_root, check=False, timeout=300)
-
-        if rc == 0:
-            self.log("OK", f"Tests passed: {test_filter}")
-        else:
-            self.log("ERROR", f"Tests failed: {test_filter}")
 
     def on_closing(self):
         self.auto_sync_active = False

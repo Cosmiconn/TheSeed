@@ -1,1 +1,0 @@
-@echo off&setlocal enabledelayedexpansion&title TheSeed Auto-Sync&echo Starting TheSeed Auto-Sync Daemon...&echo Window stays open. Press Ctrl+C to stop, or use stop-auto-sync.cmd&echo.&powershell -NoProfile -NoExit -ExecutionPolicy Bypass -File '%~dp0auto-sync.ps1'&endlocal
