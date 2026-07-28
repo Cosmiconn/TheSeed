@@ -1,24 +1,40 @@
 [submodule "submodules/seed-core"]
-	path = submodules/seed-core
-	url = https://github.com/Cosmiconn/seed-core.git
+path = submodules/seed-core
+url = https://github.com/Cosmiconn/seed-core.git
+branch = main
+
 [submodule "submodules/seed-network"]
-	path = submodules/seed-network
-	url = https://github.com/theseed/seed-network.git
+path = submodules/seed-network
+url = https://github.com/theseed/seed-network.git
+branch = main
+
 [submodule "submodules/seed-renderer"]
-	path = submodules/seed-renderer
-	url = https://github.com/theseed/seed-renderer.git
+path = submodules/seed-renderer
+url = https://github.com/theseed/seed-renderer.git
+branch = main
+
 [submodule "submodules/seed-editor"]
-	path = submodules/seed-editor
-	url = https://github.com/theseed/seed-editor.git
+path = submodules/seed-editor
+url = https://github.com/theseed/seed-editor.git
+branch = main
+
 [submodule "submodules/seed-game"]
-	path = submodules/seed-game
-	url = https://github.com/theseed/seed-game.git
+path = submodules/seed-game
+url = https://github.com/theseed/seed-game.git
+branch = main
+
 [submodule "submodules/seed-platform"]
-	path = submodules/seed-platform
-	url = https://github.com/theseed/seed-platform.git
+path = submodules/seed-platform
+url = https://github.com/theseed/seed-platform.git
+branch = main
+
 [submodule "submodules/seed-cloud"]
-	path = submodules/seed-cloud
-	url = https://github.com/theseed/seed-cloud.git
+path = submodules/seed-cloud
+url = https://github.com/theseed/seed-cloud.git
+branch = main
+
 [submodule "submodules/seed-launch"]
-	path = submodules/seed-launch
-	url = https://github.com/theseed/seed-launch.git
+path = submodules/seed-launch
+url = https://github.com/theseed/seed-launch.git
+branch = main
+
