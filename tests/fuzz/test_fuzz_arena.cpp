@@ -27,7 +27,7 @@ static int fuzzArena(const uint8_t* data, size_t size) {
     for (size_t i = 0; i + 4 <= size; i += 4) {
         uint32_t req = *reinterpret_cast<const uint32_t*>(data + i);
         size_t allocSize = (req & 0xFFFF) + 1;
-        size_t alignment = 1u << ((req >> 16) & 0xF);
+        size_t alignment = static_cast<size_t>(1) << ((req >> 16) & 0xF);
         if (alignment == 0) alignment = 1;
 
         void* p = arena.allocate(allocSize, alignment);
