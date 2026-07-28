@@ -1,0 +1,14 @@
+{
+  "OutputFoldersPerTargetSystem": {
+    "Local Machine": [
+      "build\\windows-debug",
+      "build\\windows-release"
+    ]
+  },
+  "ExpandedNodes": [
+    "",
+    "\\submodules",
+    "\\submodules\\seed-core"
+  ],
+  "PreviewInSolutionExplorer": false
+}
