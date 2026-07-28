@@ -79,6 +79,7 @@ python3 scripts/sync/theseed_sync.py --build --preset linux-debug-sanitizer
 | `linux-debug` | Linux | Debug | None |
 | `linux-debug-sanitizer` | Linux | Debug | ASan+UBSan |
 | `windows-release` | Windows | Release | None |
+| `windows-debug` | Windows | Debug | ASan+UBSan |
 
 ### Test Commands
 

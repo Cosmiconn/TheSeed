@@ -42,10 +42,19 @@
       "binaryDir": "${sourceDir}/build/linux-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "linux-debug-sanitizer",
+      "inherits": "base",
+      "displayName": "Linux Debug + Sanitizer",
+      "binaryDir": "${sourceDir}/build/linux-debug-sanitizer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "SEED_ENABLE_SANITIZERS": "ON"
-      },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+      }
     },
     {
       "name": "linux-release",
@@ -55,18 +64,19 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "VCPKG_TARGET_TRIPLET": "x64-linux"
-      },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+      }
     }
   ],
   "buildPresets": [
     { "name": "windows-debug", "configurePreset": "windows-debug" },
     { "name": "windows-release", "configurePreset": "windows-release" },
     { "name": "linux-debug", "configurePreset": "linux-debug" },
+    { "name": "linux-debug-sanitizer", "configurePreset": "linux-debug-sanitizer" },
     { "name": "linux-release", "configurePreset": "linux-release" }
   ],
   "testPresets": [
     { "name": "windows-debug", "configurePreset": "windows-debug", "output": { "outputOnFailure": true } },
-    { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } }
+    { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },
+    { "name": "linux-debug-sanitizer", "configurePreset": "linux-debug-sanitizer", "output": { "outputOnFailure": true } }
   ]
 }

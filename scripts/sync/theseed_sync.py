@@ -384,7 +384,7 @@ def main():
     parser.add_argument("--gui", action="store_true", help="Launch GUI")
     parser.add_argument("--build", action="store_true", help="Build project")
     parser.add_argument("--preset", default="linux-release",
-                        choices=["linux-release", "linux-debug", "linux-debug-sanitizer", "windows-release"],
+                        choices=["linux-release", "linux-debug", "linux-debug-sanitizer", "windows-release", "windows-debug"],
                         help="CMake preset (default: linux-release)")
     parser.add_argument("--test", action="store_true", help="Run tests")
     parser.add_argument("--test-filter", default="all",

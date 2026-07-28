@@ -130,7 +130,7 @@ class SubmoduleSyncGUI:
               font=("Segoe UI", 9, "bold")).pack(side="left")
         self.preset_var = StringVar(value="linux-release")
         self.cmb_preset = ttk.Combobox(bt_frame, textvariable=self.preset_var,
-            values=["linux-release", "linux-debug", "linux-debug-sanitizer", "windows-release"],
+            values=["linux-release", "linux-debug", "linux-debug-sanitizer", "windows-release", "windows-debug"],
             width=22, state="readonly")
         self.cmb_preset.pack(side="left", padx=(4, 12))
 
