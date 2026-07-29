@@ -13,6 +13,9 @@ using namespace seed::memory;
 struct Position { float x, y, z; };
 struct Velocity { float x, y, z; };
 
+SEED_REGISTER_COMPONENT_WITH_ID(Position, 1)
+SEED_REGISTER_COMPONENT_WITH_ID(Velocity, 2)
+
 TEST_CASE("Meta_Property_ECS_CreateDestroyConsistency") {
     rc::check("Meta-level: entity count consistent", []() {
         BlockAllocator blockAlloc(64 * 1024 * 1024);
@@ -28,7 +31,7 @@ TEST_CASE("Meta_Property_ECS_CreateDestroyConsistency") {
         RC_ASSERT(world.entityCount() == static_cast<size_t>(numCreate));
 
         for (int i = 0; i < numDestroy; ++i) {
-            world.destroyEntity(entities[i]);
+            world.destroyEntity(entities[static_cast<size_t>(i)]);
         }
         RC_ASSERT(world.entityCount() == static_cast<size_t>(numCreate - numDestroy));
     });

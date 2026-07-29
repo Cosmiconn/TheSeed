@@ -5,8 +5,20 @@
 #include <doctest/doctest.h>
 #include <rapidcheck.h>
 #include <seed/math.h>
+#include <cmath>
 
 using namespace seed::math;
+
+// ---------------------------------------------------------------------------
+// Helper: near-equal comparison for floats
+// ---------------------------------------------------------------------------
+inline bool nearEqual(float a, float b, float eps = 1e-5f) {
+    return std::abs(a - b) < eps;
+}
+
+inline bool nearZero(float a, float eps = 1e-5f) {
+    return std::abs(a) < eps;
+}
 
 TEST_CASE("Meta_Property_Math_Vec3AdditionCommutative") {
     rc::check("a + b == b + a", []() {
