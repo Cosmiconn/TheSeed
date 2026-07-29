@@ -4,6 +4,7 @@ find_package(doctest CONFIG REQUIRED)
 find_package(rapidcheck CONFIG REQUIRED)
 
 add_executable(seed_meta_property_tests
+    main.cpp
     test_property_math.cpp
     test_property_random.cpp
     test_property_ecs.cpp

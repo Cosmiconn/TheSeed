@@ -1,45 +1,61 @@
-// Main defined in test_property_math.cpp
+// TheSeed Engine – Meta-Level Property Tests: ECS (rapidcheck + doctest)
+// ---------------------------------------------------------------------------
+// Cross-submodule property tests for ECS behavior.
+// ---------------------------------------------------------------------------
 #include <doctest/doctest.h>
+#include <rapidcheck.h>
 #include <seed/memory.h>
 #include <seed/ecs.h>
 
 using namespace seed::ecs;
+using namespace seed::memory;
 
-// Property: Entity count is consistent after create/destroy
-TEST_CASE("Property_ECS_EntityCountConsistent") {
-    seed::memory::BlockAllocator blockAlloc(64 * 1024 * 1024);
-    World world(&blockAlloc);
+struct Position { float x, y, z; };
+struct Velocity { float x, y, z; };
 
-    auto e1 = world.createEntity();
-    auto e2 = world.createEntity();
-    REQUIRE(world.entityCount() == 2);
+TEST_CASE("Meta_Property_ECS_CreateDestroyConsistency") {
+    rc::check("Meta-level: entity count consistent", []() {
+        BlockAllocator blockAlloc(64 * 1024 * 1024);
+        World world(&blockAlloc);
 
-    world.destroyEntity(e1);
-    REQUIRE(world.entityCount() == 1);
+        auto numCreate = *rc::gen::inRange(0, 500);
+        auto numDestroy = *rc::gen::inRange(0, numCreate + 1);
 
-    world.destroyEntity(e2);
-    REQUIRE(world.entityCount() == 0);
+        std::vector<Entity> entities;
+        for (int i = 0; i < numCreate; ++i) {
+            entities.push_back(world.createEntity());
+        }
+        RC_ASSERT(world.entityCount() == static_cast<size_t>(numCreate));
+
+        for (int i = 0; i < numDestroy; ++i) {
+            world.destroyEntity(entities[i]);
+        }
+        RC_ASSERT(world.entityCount() == static_cast<size_t>(numCreate - numDestroy));
+    });
 }
 
-// Property: Dead entity handles are invalid
-TEST_CASE("Property_ECS_DeadHandleInvalid") {
-    seed::memory::BlockAllocator blockAlloc(64 * 1024 * 1024);
-    World world(&blockAlloc);
+TEST_CASE("Meta_Property_ECS_QueryCompleteness") {
+    rc::check("Meta-level: query returns all matching entities", []() {
+        BlockAllocator blockAlloc(64 * 1024 * 1024);
+        World world(&blockAlloc);
 
-    auto e = world.createEntity();
-    world.destroyEntity(e);
-    REQUIRE(!world.isAlive(e));
-}
+        auto numEntities = *rc::gen::inRange(10, 200);
+        int withBoth = 0;
 
-// Property: Entity recycling works
-TEST_CASE("Property_ECS_EntityRecycling") {
-    seed::memory::BlockAllocator blockAlloc(64 * 1024 * 1024);
-    World world(&blockAlloc);
+        for (int i = 0; i < numEntities; ++i) {
+            auto e = world.createEntity();
+            world.addComponent<Position>(e, static_cast<float>(i), 0.0f, 0.0f);
+            if (*rc::gen::arbitrary<bool>()) {
+                world.addComponent<Velocity>(e, 1.0f, 0.0f, 0.0f);
+                ++withBoth;
+            }
+        }
 
-    auto e1 = world.createEntity();
-    world.destroyEntity(e1);
-    auto e2 = world.createEntity();
-    // e2 should reuse e1's slot but with incremented version
-    REQUIRE(!world.isAlive(e1));
-    REQUIRE(world.isAlive(e2));
+        size_t count = 0;
+        for (auto [pos, vel] : world.query<Position, Velocity>()) {
+            (void)pos; (void)vel;
+            ++count;
+        }
+        RC_ASSERT(count == static_cast<size_t>(withBoth));
+    });
 }

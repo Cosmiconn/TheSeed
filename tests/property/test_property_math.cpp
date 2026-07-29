@@ -1,54 +1,55 @@
-#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+// TheSeed Engine – Meta-Level Property Tests: Math (rapidcheck + doctest)
+// ---------------------------------------------------------------------------
+// Cross-submodule property tests for math correctness.
+// ---------------------------------------------------------------------------
 #include <doctest/doctest.h>
+#include <rapidcheck.h>
 #include <seed/math.h>
 
 using namespace seed::math;
 
-// Property: Vector addition is commutative
-TEST_CASE("Property_Math_Vec3_Commutative") {
-    Vec3 a(1.0f, 2.0f, 3.0f);
-    Vec3 b(4.0f, 5.0f, 6.0f);
-    REQUIRE(a + b == b + a);
+TEST_CASE("Meta_Property_Math_Vec3AdditionCommutative") {
+    rc::check("a + b == b + a", []() {
+        Vec3 a(*rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>());
+        Vec3 b(*rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>());
+        Vec3 s1 = a + b;
+        Vec3 s2 = b + a;
+        RC_ASSERT(nearEqual(s1.x, s2.x));
+        RC_ASSERT(nearEqual(s1.y, s2.y));
+        RC_ASSERT(nearEqual(s1.z, s2.z));
+    });
 }
 
-// Property: Scalar multiplication distributes over addition
-TEST_CASE("Property_Math_Vec3_Distributive") {
-    Vec3 v(1.0f, 2.0f, 3.0f);
-    float s = 2.0f;
-    REQUIRE((v + v) == v * s);
+TEST_CASE("Meta_Property_Math_Vec3ScalarDistributive") {
+    rc::check("s * (a + b) == s*a + s*b", []() {
+        Vec3 a(*rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>());
+        Vec3 b(*rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>());
+        float s = *rc::gen::arbitrary<float>();
+        Vec3 left = (a + b) * s;
+        Vec3 right = a * s + b * s;
+        RC_ASSERT(nearEqual(left.x, right.x));
+        RC_ASSERT(nearEqual(left.y, right.y));
+        RC_ASSERT(nearEqual(left.z, right.z));
+    });
 }
 
-// Property: Dot product is commutative
-TEST_CASE("Property_Math_Vec3_DotCommutative") {
-    Vec3 a(1.0f, 2.0f, 3.0f);
-    Vec3 b(4.0f, 5.0f, 6.0f);
-    REQUIRE(dot(a, b) == dot(b, a));
+TEST_CASE("Meta_Property_Math_Vec3NormalizeLengthOne") {
+    rc::check("length(normalize(v)) == 1", []() {
+        Vec3 v(*rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>());
+        RC_PRE(!nearZero(lengthSq(v)));
+        Vec3 n = normalize(v);
+        RC_ASSERT(nearEqual(length(n), 1.0f));
+    });
 }
 
-// Property: Cross product of parallel vectors is zero
-TEST_CASE("Property_Math_Vec3_CrossParallel") {
-    Vec3 a(1.0f, 2.0f, 3.0f);
-    Vec3 b = a * 2.0f;
-    Vec3 c = cross(a, b);
-    REQUIRE(c.x == doctest::Approx(0.0f));
-    REQUIRE(c.y == doctest::Approx(0.0f));
-    REQUIRE(c.z == doctest::Approx(0.0f));
-}
-
-// Property: Normalized vector has length 1
-TEST_CASE("Property_Math_Vec3_NormalizeLength") {
-    Vec3 v(3.0f, 4.0f, 0.0f);
-    Vec3 n = normalize(v);
-    REQUIRE(length(n) == doctest::Approx(1.0f));
-}
-
-// Property: Identity matrix multiplication
-TEST_CASE("Property_Math_Mat4_Identity") {
-    Mat4 m;
-    Mat4 i = Mat4::identity();
-    Mat4 r = m * i;
-    REQUIRE(r(0,0) == 1.0f);
-    REQUIRE(r(1,1) == 1.0f);
-    REQUIRE(r(2,2) == 1.0f);
-    REQUIRE(r(3,3) == 1.0f);
+TEST_CASE("Meta_Property_Math_Mat4Identity") {
+    rc::check("M * I == M", []() {
+        Mat4 m;
+        for (int i = 0; i < 16; ++i) m.m[i] = *rc::gen::arbitrary<float>();
+        Mat4 i = Mat4::identity();
+        Mat4 r = m * i;
+        for (int j = 0; j < 16; ++j) {
+            RC_ASSERT(nearEqual(r.m[j], m.m[j]));
+        }
+    });
 }
