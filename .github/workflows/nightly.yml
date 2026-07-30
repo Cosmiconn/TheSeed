@@ -15,7 +15,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULE_TOKEN }}
 
       - name: Install system dependencies
         run: |
@@ -76,13 +75,52 @@ jobs:
             ctest --test-dir build/linux-debug -R "Stress|stress" --output-on-failure
           done
 
-      - name: Valgrind Memory Check
+      # Valgrind requires a build WITHOUT sanitizers (ASan replaces malloc/free).
+      - name: Configure Debug (no sanitizers) for Valgrind
         run: |
-          ctest --test-dir build/linux-debug -N | grep -oP "Test #[0-9]+: \K[^ ]+" | while read test; do
-            echo "=== Valgrind: $test ==="
-            valgrind --leak-check=full --error-exitcode=1 \
-              ./build/linux-debug/submodules/seed-core/tests/seed_tests -tc="$test" || true
+          cmake -S . -B build/linux-debug-valgrind \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DSEED_ENABLE_SANITIZERS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build Debug (no sanitizers) for Valgrind
+        run: cmake --build build/linux-debug-valgrind --parallel
+
+      - name: Valgrind Memory Check – All Tests
+        run: |
+          # Run Valgrind on every test binary. Each binary is invoked once;
+          # doctest runs all test cases inside it automatically.
+          FAILED=0
+          for binary in \
+            "build/linux-debug-valgrind/submodules/seed-core/tests/seed_tests" \
+            "build/linux-debug-valgrind/submodules/seed-core/tests/seed_property_tests" \
+            "build/linux-debug-valgrind/submodules/seed-core/tests/seed_fuzz_pool" \
+            "build/linux-debug-valgrind/tests/integration/seed_integration_tests" \
+            "build/linux-debug-valgrind/tests/e2e/seed_e2e_tests" \
+            "build/linux-debug-valgrind/tests/gate/seed_gate_tests" \
+            "build/linux-debug-valgrind/tests/fuzz/seed_meta_fuzz_arena" \
+            "build/linux-debug-valgrind/tests/fuzz/seed_meta_fuzz_serialize"
+          do
+            if [ ! -f "$binary" ]; then
+              echo "SKIP: $binary not found"
+              continue
+            fi
+            name=$(basename "$binary")
+            echo "=== Valgrind: $name ==="
+            valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes \
+              --error-exitcode=42 "$binary" || {
+              echo "ERROR: Valgrind detected issues in $name"
+              FAILED=1
+            }
           done
+          if [ "$FAILED" -ne 0 ]; then
+            echo "Valgrind found memory errors. Failing build."
+            exit 1
+          fi
 
       - name: Static Analysis – clang-tidy
         run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/ || true

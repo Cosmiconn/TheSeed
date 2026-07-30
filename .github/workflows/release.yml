@@ -15,7 +15,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULE_TOKEN }}
 
       - name: Install dependencies
         run: |
@@ -60,7 +59,12 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/TheSeed-linux
-          cp -r build/linux-release/submodules/seed-core/libseed_core.a dist/TheSeed-linux/
+          libPath=$(find build/linux-release -name "libseed_core.a" | head -n1)
+          if [ -z "$libPath" ]; then
+            echo "ERROR: libseed_core.a not found in build/linux-release"
+            exit 1
+          fi
+          cp "$libPath" dist/TheSeed-linux/
           cp -r submodules/seed-core/src/public dist/TheSeed-linux/include
           tar czf TheSeed-linux.tar.gz -C dist TheSeed-linux
 
@@ -77,7 +81,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULE_TOKEN }}
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -131,7 +134,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist\TheSeed-windows
-          Copy-Item build\windows-release\submodules\seed-core\seed_core.lib dist\TheSeed-windows\
+          # Ninja Multi-Config may place the lib in a Release subfolder
+          $libPath = Get-ChildItem -Path build\windows-release -Recurse -Filter "seed_core.lib" | Select-Object -First 1
+          if (-not $libPath) {
+            Write-Error "seed_core.lib not found in build\windows-release"
+            exit 1
+          }
+          Copy-Item $libPath.FullName dist\TheSeed-windows\
           Copy-Item -Recurse submodules\seed-core\src\public dist\TheSeed-windows\include
           Compress-Archive -Path dist\TheSeed-windows -DestinationPath TheSeed-windows.zip
 
