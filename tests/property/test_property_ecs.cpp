@@ -18,8 +18,9 @@ SEED_REGISTER_COMPONENT_WITH_ID(Velocity, 2)
 
 TEST_CASE("Meta_Property_ECS_CreateDestroyConsistency") {
     rc::check("Meta-level: entity count consistent", []() {
-        BlockAllocator blockAlloc(64 * 1024 * 1024);
-        World world(&blockAlloc);
+        BlockAllocator blockAlloc;
+        ChunkAllocator chunkAlloc(&blockAlloc, 64 * 1024);
+        World world(&chunkAlloc);
 
         auto numCreate = *rc::gen::inRange(0, 500);
         auto numDestroy = *rc::gen::inRange(0, numCreate + 1);
@@ -39,8 +40,9 @@ TEST_CASE("Meta_Property_ECS_CreateDestroyConsistency") {
 
 TEST_CASE("Meta_Property_ECS_QueryCompleteness") {
     rc::check("Meta-level: query returns all matching entities", []() {
-        BlockAllocator blockAlloc(64 * 1024 * 1024);
-        World world(&blockAlloc);
+        BlockAllocator blockAlloc;
+        ChunkAllocator chunkAlloc(&blockAlloc, 64 * 1024);
+        World world(&chunkAlloc);
 
         auto numEntities = *rc::gen::inRange(10, 200);
         int withBoth = 0;
