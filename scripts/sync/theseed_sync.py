@@ -177,6 +177,20 @@ def github_to_local(repo_root: Path, submodules: List[Dict]) -> bool:
     else:
         log("ERROR", "Meta-repo pull failed")
         return False
+
+    # CRITICAL: Update submodules to the new pointers from meta-repo
+    log("INFO", "Updating submodules to new meta-repo pointers...")
+    rc, out, err = run(
+        ["git", "submodule", "update", "--init", "--recursive"],
+        repo_root, check=False)
+    if rc == 0:
+        if "Submodule path" in out:
+            log("OK", "Submodules updated to new pointers")
+        else:
+            log("SKIP", "Submodules already at correct commits")
+    else:
+        log("ERROR", f"Submodule update failed: {err}")
+
     for sub in submodules:
         full = repo_root / sub["path"]
         if not (full / ".git").exists():
@@ -395,10 +409,12 @@ def load_vcvars_env(vcvars_path: Path) -> dict:
     log("INFO", f"Loading MSVC environment from: {vcvars_path}")
     env_file = tempfile.mktemp(suffix=".txt")
     try:
-        cmd = f'"{vcvars_path}" x64 && set > "{env_file}"'
-        log("CMD", f"cmd /c {cmd}")
+        # Build command as raw string for shell execution
+        cmd_str = f'"{vcvars_path}" x64 && set > "{env_file}"'
+        log("CMD", f"cmd /c {cmd_str}")
         result = subprocess.run(
-            ["cmd", "/c", cmd],
+            cmd_str,
+            shell=True,
             capture_output=True, text=True, check=False, timeout=60)
         if result.returncode != 0:
             log("ERROR", f"vcvarsall.bat failed: {result.stderr}")

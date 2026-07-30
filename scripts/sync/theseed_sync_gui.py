@@ -460,11 +460,12 @@ class SubmoduleSyncGUI:
         self.log("INFO", f"Loading MSVC environment from: {vcvars_path}")
         env_file = tempfile.mktemp(suffix=".txt")
         try:
-            # Run vcvarsall.bat x64 and dump environment to file
-            cmd = f'"{vcvars_path}" x64 && set > "{env_file}"'
-            self.log("CMD", f"cmd /c {cmd}")
+            # Build command as raw string for shell execution
+            cmd_str = f'"{vcvars_path}" x64 && set > "{env_file}"'
+            self.log("CMD", f"cmd /c {cmd_str}")
             result = subprocess.run(
-                ["cmd", "/c", cmd],
+                cmd_str,
+                shell=True,
                 capture_output=True, text=True, check=False, timeout=60)
             if result.returncode != 0:
                 self.log("ERROR", f"vcvarsall.bat failed: {result.stderr}")
@@ -689,6 +690,19 @@ class SubmoduleSyncGUI:
         else:
             self.log("ERROR", "Meta-repo pull failed!")
             return
+
+        # CRITICAL: Update submodules to the new pointers from meta-repo
+        self.log("INFO", "Updating submodules to new meta-repo pointers...")
+        rc, out, err = self._run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            self.repo_root, check=False)
+        if rc == 0:
+            if "Submodule path" in out:
+                self.log("OK", "Submodules updated to new pointers")
+            else:
+                self.log("SKIP", "Submodules already at correct commits")
+        else:
+            self.log("ERROR", f"Submodule update failed: {err}")
 
         for sub in self.submodules:
             full = self.repo_root / sub["path"]
