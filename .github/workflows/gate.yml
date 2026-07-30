@@ -40,7 +40,8 @@ jobs:
           key: vcpkg-linux-${{ hashFiles('vcpkg.json') }}
 
       - name: vcpkg install
-        run: "$VCPKG_ROOT/vcpkg" install --triplet=x64-linux
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet=x64-linux
 
       - name: Configure Release
         run: |
