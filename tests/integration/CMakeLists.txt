@@ -14,4 +14,4 @@ if(SEED_ENABLE_SANITIZERS)
     seed_apply_sanitizers(seed_integration_tests)
 endif()
 
-add_test(NAME seed_integration_tests COMMAND seed_integration_tests)
+add_test(NAME seed_integration_tests COMMAND $<TARGET_FILE:seed_integration_tests>)
