@@ -14,4 +14,4 @@ if(SEED_ENABLE_SANITIZERS)
     seed_apply_sanitizers(seed_e2e_tests)
 endif()
 
-add_test(NAME seed_e2e_tests COMMAND seed_e2e_tests)
+add_test(NAME seed_e2e_tests COMMAND $<TARGET_FILE:seed_e2e_tests>)
