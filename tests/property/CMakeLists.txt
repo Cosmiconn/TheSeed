@@ -17,4 +17,4 @@ if(SEED_ENABLE_SANITIZERS)
     seed_apply_sanitizers(seed_meta_property_tests)
 endif()
 
-add_test(NAME seed_meta_property_tests COMMAND seed_meta_property_tests)
+add_test(NAME seed_meta_property_tests COMMAND $<TARGET_FILE:seed_meta_property_tests>)
