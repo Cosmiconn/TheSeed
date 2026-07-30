@@ -74,7 +74,7 @@ jobs:
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
           for i in $(seq 1 20); do
             echo "=== Stress run $i ==="
-            ctest --test-dir build/linux-debug -R "Stress|stress" --output-on-failure
+            ctest --test-dir build/linux-debug --output-on-failure
           done
 
       # Valgrind requires a build WITHOUT sanitizers (ASan replaces malloc/free).
