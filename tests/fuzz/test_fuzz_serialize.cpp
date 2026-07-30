@@ -33,7 +33,7 @@ static int fuzzSerialize(const uint8_t* data, size_t size) {
             case 4: if (reader.remaining() >= 2) reader.readUInt16(); break;
             case 5: if (reader.remaining() >= 1) reader.readBool(); break;
             case 6: if (reader.remaining() >= 4) reader.readInt32(); break;
-            case 7: if (reader.remaining() >= 4) reader.readString(); break;
+            case 7: if (reader.remaining() >= 4) reader.readInt32(); break;
         }
     }
 
