@@ -25,5 +25,5 @@ if(SEED_ENABLE_SANITIZERS)
 endif()
 
 # CTest registration (runs with fixed seed input)
-add_test(NAME seed_meta_fuzz_arena_smoke COMMAND seed_meta_fuzz_arena)
-add_test(NAME seed_meta_fuzz_serialize_smoke COMMAND seed_meta_fuzz_serialize)
+add_test(NAME seed_meta_fuzz_arena_smoke COMMAND $<TARGET_FILE:seed_meta_fuzz_arena>)
+add_test(NAME seed_meta_fuzz_serialize_smoke COMMAND $<TARGET_FILE:seed_meta_fuzz_serialize>)
