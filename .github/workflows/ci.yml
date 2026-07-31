@@ -76,7 +76,8 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=x64-linux \
             -DSEED_ENABLE_SANITIZERS=ON \
-            -DBUILD_TESTING=ON
+            -DBUILD_TESTING=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Build Debug
         run: cmake --build build/linux-debug --parallel
