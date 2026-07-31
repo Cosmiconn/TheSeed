@@ -108,6 +108,9 @@ class SubmoduleSyncGUI:
         Button(btn_bar, text="GitHub -> Local", bg="#3a86ff", fg="white",
                command=self.on_github_to_local, **btn_cfg).pack(side="left", padx=4)
 
+        Button(btn_bar, text="Update Submodules", bg="#ff6b35", fg="white",
+               command=self.on_update_submodules, **btn_cfg).pack(side="left", padx=4)
+
         Button(btn_bar, text="Local -> GitHub", bg="#8338ec", fg="white",
                command=self.on_local_to_github, **btn_cfg).pack(side="left", padx=4)
 
@@ -369,44 +372,64 @@ class SubmoduleSyncGUI:
 
     # ============ AUTO-INSTALL HELPERS ============
 
+    def _get_vcpkg_global_dir(self) -> Path:
+        """Return the global vcpkg installation directory (outside the repo)."""
+        system = platform.system()
+        if system == "Windows":
+            base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+            return base / "TheSeed" / "vcpkg"
+        else:
+            return Path.home() / ".local" / "share" / "theseed" / "vcpkg"
+
     def _ensure_vcpkg(self) -> bool:
-        """Ensure vcpkg is available. Auto-install if missing."""
+        """Ensure vcpkg is available. Auto-install to global dir if missing."""
         self.log("INFO", "Checking vcpkg...")
         vcpkg_env = os.environ.get("VCPKG_ROOT", "")
-        vcpkg_local = self.repo_root / "vcpkg"
         vcpkg_env_path = Path(vcpkg_env) / "scripts" / "buildsystems" / "vcpkg.cmake" if vcpkg_env else None
+        vcpkg_global = self._get_vcpkg_global_dir()
+        vcpkg_legacy = self.repo_root / "vcpkg"
 
-        # Already available?
+        # 1. VCPKG_ROOT env var
         if vcpkg_env_path and vcpkg_env_path.exists():
             self.log("OK", f"vcpkg found via VCPKG_ROOT: {vcpkg_env}")
             return True
-        if (vcpkg_local / "scripts" / "buildsystems" / "vcpkg.cmake").exists():
-            self.log("OK", f"vcpkg found locally: {vcpkg_local}")
-            os.environ["VCPKG_ROOT"] = str(vcpkg_local)
+
+        # 2. Global install (preferred)
+        if (vcpkg_global / "scripts" / "buildsystems" / "vcpkg.cmake").exists():
+            self.log("OK", f"vcpkg found globally: {vcpkg_global}")
+            os.environ["VCPKG_ROOT"] = str(vcpkg_global)
             return True
 
-        # Auto-install
-        self.log("INSTALL", "vcpkg not found. Auto-installing...")
+        # 3. Legacy local install (inside repo - warn user)
+        if (vcpkg_legacy / "scripts" / "buildsystems" / "vcpkg.cmake").exists():
+            self.log("WARN", f"vcpkg found inside repo: {vcpkg_legacy}")
+            self.log("WARN", "  This can interfere with git sync. Consider moving it outside the repo.")
+            os.environ["VCPKG_ROOT"] = str(vcpkg_legacy)
+            return True
+
+        # 4. Auto-install to global location
+        self.log("INSTALL", f"vcpkg not found. Auto-installing to {vcpkg_global}...")
+        vcpkg_global.parent.mkdir(parents=True, exist_ok=True)
         rc, out, err = self._run(
-            ["git", "clone", "https://github.com/Microsoft/vcpkg.git", str(vcpkg_local)],
-            self.repo_root, check=False, timeout=120)
+            ["git", "clone", "https://github.com/Microsoft/vcpkg.git", str(vcpkg_global)],
+            vcpkg_global.parent, check=False, timeout=120)
         if rc != 0:
             self.log("ERROR", f"Failed to clone vcpkg: {err}")
             return False
 
         if platform.system() == "Windows":
-            bootstrap = vcpkg_local / "bootstrap-vcpkg.bat"
-            rc, out, err = self._run([str(bootstrap)], self.repo_root, check=False, timeout=120)
+            bootstrap = vcpkg_global / "bootstrap-vcpkg.bat"
+            rc, out, err = self._run([str(bootstrap)], vcpkg_global, check=False, timeout=120)
         else:
-            bootstrap = vcpkg_local / "bootstrap-vcpkg.sh"
-            rc, out, err = self._run(["bash", str(bootstrap)], self.repo_root, check=False, timeout=120)
+            bootstrap = vcpkg_global / "bootstrap-vcpkg.sh"
+            rc, out, err = self._run(["bash", str(bootstrap)], vcpkg_global, check=False, timeout=120)
 
         if rc != 0:
             self.log("ERROR", f"vcpkg bootstrap failed: {err}")
             return False
 
-        os.environ["VCPKG_ROOT"] = str(vcpkg_local)
-        self.log("OK", f"vcpkg installed at: {vcpkg_local}")
+        os.environ["VCPKG_ROOT"] = str(vcpkg_global)
+        self.log("OK", f"vcpkg installed at: {vcpkg_global}")
         return True
 
     def _ensure_ninja(self) -> bool:
@@ -588,11 +611,51 @@ class SubmoduleSyncGUI:
         ok = self._ensure_cmake() and ok
         if ok:
             ok = self._ensure_vcpkg_deps() and ok
+        ok = self._ensure_gitignore() and ok
         if ok:
             self.log("OK", "=== ALL PREREQUISITES READY ===")
         else:
             self.log("ERROR", "=== SOME PREREQUISITES MISSING ===")
         return ok
+
+    def _ensure_gitignore(self) -> bool:
+        """Ensure .gitignore contains entries that prevent sync pollution."""
+        self.log("INFO", "Checking .gitignore...")
+        gitignore = self.repo_root / ".gitignore"
+
+        required_patterns = [
+            "/vcpkg/",
+            "/build/",
+            "/.vs/",
+            "/out/",
+            "/CMakeUserPresets.json",
+            "/.cache/",
+            "*.user",
+        ]
+
+        existing = set()
+        if gitignore.exists():
+            with open(gitignore, "r", encoding="utf-8") as f:
+                for line in f:
+                    existing.add(line.strip().rstrip("/"))
+
+        missing = []
+        for p in required_patterns:
+            clean = p.strip().rstrip("/")
+            if clean not in existing and clean.lstrip("/") not in existing:
+                missing.append(p)
+
+        if missing:
+            self.log("WARN", f"Missing .gitignore entries: {missing}")
+            with open(gitignore, "a", encoding="utf-8") as f:
+                f.write("\n# TheSeed sync tool auto-generated ignores\n")
+                for p in missing:
+                    f.write(f"{p}\n")
+            self.log("OK", ".gitignore updated")
+            return True
+        else:
+            self.log("SKIP", ".gitignore already complete")
+            return False
 
     # ============ ACTIONS ============
 
@@ -665,8 +728,8 @@ class SubmoduleSyncGUI:
             current = out2.strip()
 
             if current == "HEAD":
-                self.log("WARN", f"{sub['name']}: Detached HEAD, checking out {sub['branch']}...")
-                self._run(["git", "checkout", "-B", sub["branch"], f"origin/{sub['branch']}"],
+                self.log("WARN", f"{sub['name']}: Detached HEAD, checking out {sub['branch']} at meta-repo commit...")
+                self._run(["git", "checkout", "-B", sub["branch"]],
                          full, check=False)
             elif current != sub["branch"]:
                 self.log("WARN", f"{sub['name']}: Switching from '{current}' to '{sub['branch']}'...")
@@ -711,33 +774,31 @@ class SubmoduleSyncGUI:
                 continue
 
             self.log("INFO", f"--- {sub['name']} ---")
-            self._run(["git", "fetch", "origin"], full, check=False)
 
             rc2, out2, _ = self._run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"], full, check=False, silent=True)
             current = out2.strip()
 
             if current == "HEAD":
-                self.log("WARN", f"  Detached HEAD -> checking out {sub['branch']}")
-                self._run(["git", "checkout", "-B", sub["branch"], f"origin/{sub['branch']}"],
+                self.log("INFO", f"  {sub['name']}: Detached HEAD -> checkout {sub['branch']} at meta-repo commit")
+                self._run(["git", "checkout", "-B", sub["branch"]],
                          full, check=False)
+                self._run(["git", "branch", "--set-upstream-to",
+                          f"origin/{sub['branch']}", sub["branch"]], full, check=False)
+                self.log("OK", f"  {sub['name']}: on {sub['branch']} at meta-repo commit")
             elif current != sub["branch"]:
-                self.log("WARN", f"  Switching to {sub['branch']}")
+                self.log("WARN", f"  {sub['name']}: Switching to {sub['branch']}")
                 self._run(["git", "checkout", sub["branch"]], full, check=False)
                 self._run(["git", "branch", "--set-upstream-to",
                           f"origin/{sub['branch']}", sub["branch"]], full, check=False)
-
-            rc3, out3, _ = self._run(
-                ["git", "pull", "origin", sub["branch"]], full, check=False)
-            if rc3 == 0:
-                if "Already up to date" in out3:
-                    self.log("SKIP", f"  {sub['name']}: already up to date")
-                else:
-                    self.log("OK", f"  {sub['name']}: updated")
+                self.log("OK", f"  {sub['name']}: on {sub['branch']}")
             else:
-                self.log("ERROR", f"  {sub['name']}: pull failed")
+                self.log("SKIP", f"  {sub['name']}: already on {sub['branch']} at meta-repo commit")
 
-        self._update_meta_pointer()
+            # NOTE: Kein 'git pull' hier! GitHub -> Local reproduziert den exakten Stand.
+            # Die Submodule bleiben auf den Commits, die das Meta-Repo referenziert.
+
+        self.log("OK", "GitHub -> Local complete. Submodules are at exact meta-repo commits.")
 
     def on_local_to_github(self):
         self._thread(self._local_to_github)
@@ -805,6 +866,34 @@ class SubmoduleSyncGUI:
         else:
             self.log("SKIP", "Meta-repo: nothing to push")
 
+    def on_update_submodules(self):
+        self._thread(self._update_submodules_to_latest)
+
+    def _update_submodules_to_latest(self):
+        """Explicitly pull all submodules to the latest origin/main commit."""
+        self.log("INFO", "=== UPDATE SUBMODULES TO LATEST ===")
+        for sub in self.submodules:
+            full = self.repo_root / sub["path"]
+            if not (full / ".git").exists():
+                self.log("WARN", f"{sub['name']}: not initialized, skipping")
+                continue
+
+            self.log("INFO", f"--- {sub['name']} ---")
+            self._run(["git", "fetch", "origin"], full, check=False, silent=True)
+
+            rc, out, _ = self._run(
+                ["git", "pull", "origin", sub["branch"]], full, check=False)
+            if rc == 0:
+                if "Already up to date" in out:
+                    self.log("SKIP", f"  {sub['name']}: already up to date")
+                else:
+                    self.log("OK", f"  {sub['name']}: updated to latest")
+            else:
+                self.log("ERROR", f"  {sub['name']}: pull failed")
+
+        self._update_meta_pointer()
+        self.log("OK", "Submodules updated to latest. Meta-repo pointers refreshed.")
+
     def on_full_sync(self):
         self._thread(self._full_sync)
 
@@ -862,7 +951,7 @@ class SubmoduleSyncGUI:
             self.log("ERROR", "Prerequisites not met. Build aborted.")
             return
 
-        build_dir = self.repo_root / "build" / preset.replace("-", "_")
+        build_dir = self.repo_root / "build" / preset
         build_dir.mkdir(parents=True, exist_ok=True)
 
         # On Windows: if not in Developer Prompt, load vcvars env
@@ -897,7 +986,7 @@ class SubmoduleSyncGUI:
         # Build
         self.log("INFO", "Building...")
         rc, out, err = self._run_env(
-            ["cmake", "--build", f"build/{preset.replace('-', '_')}", "--parallel"],
+            ["cmake", "--build", f"build/{preset}", "--parallel"],
             self.repo_root, env=env, check=False, timeout=600)
         if rc == 0:
             self.log("OK", f"Build complete: {preset}")
@@ -988,6 +1077,163 @@ class SubmoduleSyncGUI:
     def on_closing(self):
         self.auto_sync_active = False
         self.root.destroy()
+
+    def on_configure(self):
+        self._thread(self._configure)
+
+    def _configure(self):
+        preset = self.preset_var.get()
+        self.log("INFO", f"=== CONFIGURE: {preset} ===")
+        if not self._ensure_all_prerequisites():
+            self.log("ERROR", "Prerequisites not met. Configure aborted.")
+            return
+        extra_env = {}
+        if platform.system() == "Windows":
+            rc, _, _ = self._run(["cl"], self.repo_root, check=False, silent=True)
+            if rc != 0:
+                vcvars_path = self._find_vcvarsall()
+                if vcvars_path:
+                    vcvars_env = self._load_vcvars_env(vcvars_path)
+                    if vcvars_env:
+                        extra_env = vcvars_env
+                        os.environ.update(vcvars_env)
+                    else:
+                        self.log("ERROR", "Failed to load MSVC environment")
+                        return
+                else:
+                    self.log("ERROR", "MSVC environment not found")
+                    return
+        env = {**os.environ, **extra_env} if extra_env else None
+        rc, out, err = self._run_env(["cmake", "--preset", preset], self.repo_root, env=env, check=False)
+        if rc != 0:
+            self.log("ERROR", f"CMake configure failed for preset '{preset}'")
+            return
+        self.log("OK", f"Configure complete: {preset}")
+
+    def on_health_check(self):
+        self._thread(self._health_check)
+
+    def _health_check(self):
+        self.log("INFO", "=== HEALTH CHECK ===")
+        all_ok = True
+        for sub in self.submodules:
+            full = self.repo_root / sub["path"]
+            self.log("INFO", f"--- {sub['name']} ---")
+            if not (full / ".git").exists():
+                self.log("ERROR", f"  Not initialized")
+                all_ok = False
+                continue
+            rc, _, err = self._run(["git", "ls-remote", "--heads", "origin", sub["branch"]],
+                                    full, silent=True, timeout=15)
+            if rc != 0:
+                self.log("ERROR", f"  Remote unreachable: {err}")
+                all_ok = False
+            else:
+                self.log("OK", f"  Remote reachable")
+            rc, out, _ = self._run(["git", "remote", "get-url", "origin"], full, silent=True)
+            actual_url = out.strip()
+            expected_url = sub["url"]
+            if actual_url != expected_url:
+                self.log("WARN", f"  URL mismatch: expected {expected_url}, got {actual_url}")
+            else:
+                self.log("OK", f"  URL correct")
+            rc, out, _ = self._run(["git", "log", f"HEAD...origin/{sub['branch']}", "--oneline"],
+                                    full, silent=True)
+            if out.strip():
+                self.log("WARN", f"  Diverged from origin/{sub['branch']}")
+            else:
+                self.log("OK", f"  No divergence")
+            rc, out, _ = self._run(["git", "lfs", "status"], full, silent=True)
+            if rc == 0 and out.strip():
+                if "clean" not in out.lower():
+                    self.log("WARN", f"  LFS: {out.strip()}")
+                else:
+                    self.log("OK", f"  LFS clean")
+            elif rc != 0:
+                self.log("SKIP", f"  LFS not installed/configured")
+            size = "?"
+            try:
+                total = sum(f.stat().st_size for f in full.rglob("*") if f.is_file())
+                for unit in ["B", "KB", "MB", "GB"]:
+                    if total < 1024:
+                        size = f"{total:.0f}{unit}"
+                        break
+                    total /= 1024
+            except Exception:
+                pass
+            self.log("INFO", f"  Size: {size}")
+        if all_ok:
+            self.log("OK", "=== HEALTH CHECK PASSED ===")
+            notify("TheSeed Health Check", "All submodules are healthy!")
+        else:
+            self.log("ERROR", "=== HEALTH CHECK FOUND ISSUES ===")
+            notify("TheSeed Health Check", "Issues found! Check the log.")
+
+    def on_clean(self):
+        self._thread(self._clean)
+
+    def _clean(self):
+        self.log("INFO", "=== AUTO CLEANUP ===")
+        preset = self.preset_var.get()
+        cleaned = []
+        build_dir = self.repo_root / "build"
+        if build_dir.exists():
+            target = build_dir / preset
+            if target.exists():
+                shutil.rmtree(target)
+                cleaned.append(f"build/{preset}")
+        for cache in [self.repo_root / "CMakeCache.txt", self.repo_root / "CMakeFiles"]:
+            if cache.exists():
+                if cache.is_dir():
+                    shutil.rmtree(cache)
+                else:
+                    cache.unlink()
+                cleaned.append(str(cache.name))
+        if cleaned:
+            self.log("OK", f"Cleaned: {cleaned}")
+        else:
+            self.log("SKIP", "Nothing to clean")
+
+    def on_release(self):
+        version = simpledialog.askstring("Release", "Enter version (e.g. 1.2.3):", parent=self.root)
+        if version:
+            self._thread(lambda: self._release(version))
+
+    def _release(self, version: str):
+        self.log("INFO", f"=== RELEASE SUBMODULES v{version} ===")
+        selected = self._get_selected()
+        for sub in self.submodules:
+            if selected and sub["name"] not in selected:
+                continue
+            full = self.repo_root / sub["path"]
+            if not (full / ".git").exists():
+                continue
+            self.log("INFO", f"Tagging {sub['name']} with v{version}...")
+            rc, _, err = self._run(["git", "tag", "-a", f"v{version}", "-m", f"Release v{version}"],
+                                    full, check=False)
+            if rc == 0:
+                rc2, _, err2 = self._run(["git", "push", "origin", f"v{version}"], full, check=False)
+                if rc2 == 0:
+                    self.log("OK", f"  {sub['name']}: tagged and pushed v{version}")
+                else:
+                    self.log("ERROR", f"  {sub['name']}: push tag failed - {err2}")
+            else:
+                self.log("WARN", f"  {sub['name']}: tag may already exist - {err}")
+        self._update_meta_pointer()
+        self.log("OK", f"Release v{version} complete.")
+
+    def on_export_log(self):
+        path = self.repo_root / f"theseed_sync_log_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(LOG_BUFFER))
+        self.log("OK", f"Log exported to {path}")
+
+    def on_toggle_theme(self):
+        self.dark_mode = not self.dark_mode
+        self._save_profile()
+        self._apply_theme()
+        self._refresh_table()
+        self.log("OK", f"Theme switched to {'dark' if self.dark_mode else 'light'}")
 
 
 def main():

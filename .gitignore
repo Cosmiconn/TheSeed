@@ -2,7 +2,6 @@ build/
 out/
 cmake-build-*/
 .vscode/
-.vs/
 .idea/
 *.user
 vcpkg_installed/
@@ -15,3 +14,16 @@ Thumbs.db
 *.so
 *.a
 *.lib
+# TheSeed sync tool auto-generated ignores
+/vcpkg/
+/CMakeUserPresets.json
+/.cache/
+
+# TheSeed sync tool auto-generated ignores
+
+
+# TheSeed sync tool auto-generated ignores
+
+
+# TheSeed sync tool auto-generated ignores
+/.vs/

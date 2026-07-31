@@ -3,7 +3,8 @@
 TheSeed Submodule Sync Tool - GUI Version
 ==========================================
 Complete bidirectional sync between GitHub and local repository.
-Handles submodule initialization, branch management, pointer updates.
+Build & Test integration with AUTO-INSTALL of missing dependencies.
+Roadmap conform.
 
 Usage:
     python theseed_sync_gui.py
@@ -11,6 +12,8 @@ Usage:
 
 import configparser
 import os
+import platform
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,25 +25,39 @@ from tkinter import (
 )
 
 
-class Colors:
-    OK = "#00aa00"
-    WARN = "#ff8800"
-    ERROR = "#cc0000"
-    INFO = "#0066cc"
-    SKIP = "#888888"
+def get_os_presets():
+    """Return presets valid for the current OS."""
+    system = platform.system()
+    if system == "Windows":
+        return ["windows-release", "windows-debug"]
+    elif system == "Linux":
+        return ["linux-release", "linux-debug"]
+    else:
+        return ["linux-release", "linux-debug", "windows-release", "windows-debug"]
+
+
+def get_default_preset():
+    """Return the default preset for the current OS."""
+    system = platform.system()
+    if system == "Windows":
+        return "windows-release"
+    else:
+        return "linux-release"
 
 
 class SubmoduleSyncGUI:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title("TheSeed Sync - GitHub <> Local")
-        self.root.geometry("1000x750")
+        self.root.geometry("1000x800")
         self.root.minsize(800, 600)
 
         self.repo_root = self._find_repo_root()
         self.submodules = []
         self.auto_sync_active = False
         self.auto_sync_thread = None
+        self.os_presets = get_os_presets()
+        self.default_preset = get_default_preset()
 
         self._build_ui()
         self._detect_submodules()
@@ -50,7 +67,6 @@ class SubmoduleSyncGUI:
         for p in [current] + list(current.parents):
             if (p / ".git").exists() and (p / ".gitmodules").exists():
                 return p
-        # Fallback: look for TheSeed directory
         for p in [current] + list(current.parents):
             if p.name.lower() == "these" or (p / "submodules").exists():
                 if (p / ".git").exists():
@@ -62,18 +78,18 @@ class SubmoduleSyncGUI:
         top = Frame(self.root, bg="#1a1a2e", padx=10, pady=8)
         top.pack(fill="x")
 
-        Label(top, text="TheSeed", font=("Segoe UI", 14, "bold"), 
+        Label(top, text="TheSeed", font=("Segoe UI", 14, "bold"),
               fg="#e94560", bg="#1a1a2e").pack(side="left")
-        Label(top, text="Submodule Sync", font=("Segoe UI", 10), 
+        Label(top, text="Submodule Sync", font=("Segoe UI", 10),
               fg="#a0a0a0", bg="#1a1a2e").pack(side="left", padx=(5, 20))
 
-        Label(top, text="Repo:", font=("Segoe UI", 9), 
+        Label(top, text="Repo:", font=("Segoe UI", 9),
               fg="#a0a0a0", bg="#1a1a2e").pack(side="left")
-        self.lbl_root = Label(top, text=str(self.repo_root), 
+        self.lbl_root = Label(top, text=str(self.repo_root),
               font=("Consolas", 9), fg="#4cc9f0", bg="#1a1a2e")
         self.lbl_root.pack(side="left", padx=(5, 0))
 
-        # === BUTTON BAR ===
+        # === SYNC BUTTON BAR ===
         btn_bar = Frame(self.root, bg="#16213e", padx=10, pady=6)
         btn_bar.pack(fill="x")
 
@@ -106,7 +122,7 @@ class SubmoduleSyncGUI:
         auto_frame.pack(fill="x")
 
         self.auto_var = IntVar(value=0)
-        self.chk_auto = Checkbutton(auto_frame, text="Auto-Sync every", 
+        self.chk_auto = Checkbutton(auto_frame, text="Auto-Sync every",
             variable=self.auto_var, bg="#16213e", fg="white",
             selectcolor="#1a1a2e", activebackground="#16213e",
             activeforeground="white", command=self.on_auto_toggle)
@@ -118,9 +134,38 @@ class SubmoduleSyncGUI:
         self.cmb_interval.pack(side="left", padx=(2, 2))
         Label(auto_frame, text="min", bg="#16213e", fg="white").pack(side="left")
 
-        self.lbl_status = Label(auto_frame, text="Idle", bg="#16213e", 
+        self.lbl_status = Label(auto_frame, text="Idle", bg="#16213e",
             fg="#888888", font=("Segoe UI", 9, "italic"))
         self.lbl_status.pack(side="right", padx=10)
+
+        # === BUILD & TEST CONTROLS ===
+        bt_frame = Frame(self.root, bg="#16213e", padx=10, pady=6)
+        bt_frame.pack(fill="x")
+
+        Label(bt_frame, text="Build:", bg="#16213e", fg="#a0a0a0",
+              font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.preset_var = StringVar(value=self.default_preset)
+        self.cmb_preset = ttk.Combobox(bt_frame, textvariable=self.preset_var,
+            values=self.os_presets, width=22, state="readonly")
+        self.cmb_preset.pack(side="left", padx=(4, 12))
+
+        Button(bt_frame, text="Build", bg="#f72585", fg="white",
+               command=self.on_build, font=("Segoe UI", 9, "bold"),
+               padx=14, pady=3, bd=0, cursor="hand2").pack(side="left", padx=2)
+
+        Label(bt_frame, text="Test:", bg="#16213e", fg="#a0a0a0",
+              font=("Segoe UI", 9, "bold")).pack(side="left", padx=(20, 0))
+        self.test_var = StringVar(value="all")
+        self.cmb_test = ttk.Combobox(bt_frame, textvariable=self.test_var,
+            values=["all", "unit", "integration", "property", "fuzz", "benchmark",
+                    "gate_p0", "gate_p1", "gate_p2", "gate_p3",
+                    "gate_p4", "gate_p5", "gate_p6", "gate_p7"],
+            width=18, state="readonly")
+        self.cmb_test.pack(side="left", padx=(4, 12))
+
+        Button(bt_frame, text="Run Tests", bg="#7209b7", fg="white",
+               command=self.on_test, font=("Segoe UI", 9, "bold"),
+               padx=14, pady=3, bd=0, cursor="hand2").pack(side="left", padx=2)
 
         # === SUBMODULE TABLE ===
         table_frame = Frame(self.root, padx=10, pady=5)
@@ -179,6 +224,7 @@ class SubmoduleSyncGUI:
         self.txt_log.tag_config("INFO", foreground="#44aaff")
         self.txt_log.tag_config("SKIP", foreground="#888888")
         self.txt_log.tag_config("CMD", foreground="#cc88ff")
+        self.txt_log.tag_config("INSTALL", foreground="#00ffff")
 
         # === PROGRESS BAR ===
         self.progress = ttk.Progressbar(self.root, mode="indeterminate")
@@ -195,12 +241,12 @@ class SubmoduleSyncGUI:
         self.txt_log.see(END)
         self.txt_log.update()
 
-    def _run(self, cmd, cwd, check=False, silent=False) -> tuple:
+    def _run(self, cmd, cwd, check=False, silent=False, timeout=60) -> tuple:
         if not silent:
             self.log("CMD", f"{' '.join(cmd)}  (in {cwd})")
         try:
-            result = subprocess.run(cmd, cwd=cwd, capture_output=True, 
-                                   text=True, check=False, timeout=60)
+            result = subprocess.run(cmd, cwd=cwd, capture_output=True,
+                                   text=True, check=False, timeout=timeout)
             if result.stdout and not silent:
                 for line in result.stdout.strip().splitlines():
                     self.log("INFO", f"  > {line}")
@@ -212,7 +258,7 @@ class SubmoduleSyncGUI:
                         self.log("INFO", f"  ! {line}")
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
-            self.log("ERROR", f"  X Command timed out after 60s")
+            self.log("ERROR", f"  X Command timed out after {timeout}s")
             return 1, "", "timeout"
         except Exception as e:
             self.log("ERROR", f"  X Exception: {e}")
@@ -255,16 +301,14 @@ class SubmoduleSyncGUI:
                 ), tags=("notinit",))
                 continue
 
-            # Get current branch
-            rc, out, _ = self._run(["git", "rev-parse", "--abbrev-ref", "HEAD"], 
+            rc, out, _ = self._run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                                     full, check=False, silent=True)
             current_branch = out.strip() if rc == 0 else "error"
 
-            # Get ahead/behind
             ahead_behind = "?"
             if current_branch != "HEAD" and current_branch != "error":
                 rc2, out2, _ = self._run(
-                    ["git", "rev-list", "--left-right", 
+                    ["git", "rev-list", "--left-right",
                      f"origin/{sub['branch']}...{current_branch}", "--count"],
                     full, check=False, silent=True)
                 if rc2 == 0:
@@ -278,7 +322,6 @@ class SubmoduleSyncGUI:
                             parts_list.append(f"-{behind}")
                         ahead_behind = ", ".join(parts_list) if parts_list else "synced"
 
-            # Get status
             rc3, out3, _ = self._run(["git", "status", "--short"], full, check=False, silent=True)
             if out3.strip():
                 status = f"Modified ({len(out3.strip().splitlines())} files)"
@@ -305,6 +348,8 @@ class SubmoduleSyncGUI:
                 for c in child.winfo_children():
                     if isinstance(c, Button):
                         c.configure(state=state)
+                    elif isinstance(c, ttk.Combobox):
+                        c.configure(state="disabled" if busy else "readonly")
         if busy:
             self.progress.start()
             self.lbl_status.configure(text="Working...", fg="#ff9f1c")
@@ -321,6 +366,233 @@ class SubmoduleSyncGUI:
                 self._set_busy(False)
                 self._refresh_table()
         threading.Thread(target=wrapper, daemon=True).start()
+
+    # ============ AUTO-INSTALL HELPERS ============
+
+    def _ensure_vcpkg(self) -> bool:
+        """Ensure vcpkg is available. Auto-install if missing."""
+        self.log("INFO", "Checking vcpkg...")
+        vcpkg_env = os.environ.get("VCPKG_ROOT", "")
+        vcpkg_local = self.repo_root / "vcpkg"
+        vcpkg_env_path = Path(vcpkg_env) / "scripts" / "buildsystems" / "vcpkg.cmake" if vcpkg_env else None
+
+        # Already available?
+        if vcpkg_env_path and vcpkg_env_path.exists():
+            self.log("OK", f"vcpkg found via VCPKG_ROOT: {vcpkg_env}")
+            return True
+        if (vcpkg_local / "scripts" / "buildsystems" / "vcpkg.cmake").exists():
+            self.log("OK", f"vcpkg found locally: {vcpkg_local}")
+            os.environ["VCPKG_ROOT"] = str(vcpkg_local)
+            return True
+
+        # Auto-install
+        self.log("INSTALL", "vcpkg not found. Auto-installing...")
+        rc, out, err = self._run(
+            ["git", "clone", "https://github.com/Microsoft/vcpkg.git", str(vcpkg_local)],
+            self.repo_root, check=False, timeout=120)
+        if rc != 0:
+            self.log("ERROR", f"Failed to clone vcpkg: {err}")
+            return False
+
+        if platform.system() == "Windows":
+            bootstrap = vcpkg_local / "bootstrap-vcpkg.bat"
+            rc, out, err = self._run([str(bootstrap)], self.repo_root, check=False, timeout=120)
+        else:
+            bootstrap = vcpkg_local / "bootstrap-vcpkg.sh"
+            rc, out, err = self._run(["bash", str(bootstrap)], self.repo_root, check=False, timeout=120)
+
+        if rc != 0:
+            self.log("ERROR", f"vcpkg bootstrap failed: {err}")
+            return False
+
+        os.environ["VCPKG_ROOT"] = str(vcpkg_local)
+        self.log("OK", f"vcpkg installed at: {vcpkg_local}")
+        return True
+
+    def _ensure_ninja(self) -> bool:
+        """Ensure Ninja is available. Auto-install if missing."""
+        self.log("INFO", "Checking Ninja...")
+        rc, _, _ = self._run(["ninja", "--version"], self.repo_root, check=False, silent=True)
+        if rc == 0:
+            self.log("OK", "Ninja found")
+            return True
+
+        self.log("INSTALL", "Ninja not found. Auto-installing via pip...")
+        rc, out, err = self._run(
+            [sys.executable, "-m", "pip", "install", "ninja"],
+            self.repo_root, check=False, timeout=120)
+        if rc != 0:
+            self.log("ERROR", f"Failed to install Ninja: {err}")
+            return False
+
+        # Verify
+        rc, out, _ = self._run(["ninja", "--version"], self.repo_root, check=False, silent=True)
+        if rc == 0:
+            self.log("OK", "Ninja installed successfully")
+            return True
+        else:
+            self.log("ERROR", "Ninja installed but not in PATH. Restart the tool.")
+            return False
+
+    def _find_vcvarsall(self) -> Path:
+        """Find vcvarsall.bat for MSVC on Windows. Searches 2022, 2026, etc."""
+        self.log("INFO", "Searching for vcvarsall.bat...")
+        program_files = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+        program_files_64 = os.environ.get("ProgramFiles", "C:\\Program Files")
+
+        editions = ["Community", "Professional", "Enterprise", "BuildTools"]
+        years = ["2026", "18", "2025", "2024", "2022", "2019"]
+
+        for pf in [program_files_64, program_files]:
+            for year in years:
+                for edition in editions:
+                    vcvars = Path(pf) / "Microsoft Visual Studio" / year / edition / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+                    self.log("INFO", f"  Checking: {vcvars}")
+                    if vcvars.exists():
+                        self.log("OK", f"  Found: {vcvars}")
+                        return vcvars
+        self.log("WARN", "  vcvarsall.bat not found in any standard location")
+        return None
+
+    def _load_vcvars_env(self, vcvars_path: Path) -> dict:
+        """Run vcvarsall.bat and extract environment variables."""
+        import tempfile
+        self.log("INFO", f"Loading MSVC environment from: {vcvars_path}")
+        env_file = tempfile.mktemp(suffix=".txt")
+        try:
+            # Build command as raw string for shell execution
+            cmd_str = f'"{vcvars_path}" x64 && set > "{env_file}"'
+            self.log("CMD", f"cmd /c {cmd_str}")
+            result = subprocess.run(
+                cmd_str,
+                shell=True,
+                capture_output=True, text=True, check=False, timeout=60)
+            if result.returncode != 0:
+                self.log("ERROR", f"vcvarsall.bat failed: {result.stderr}")
+                return {}
+
+            # Parse environment file
+            env = {}
+            if not Path(env_file).exists():
+                self.log("ERROR", "Environment file not created")
+                return {}
+
+            with open(env_file, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        env[key] = value
+
+            self.log("OK", f"Loaded {len(env)} environment variables from vcvarsall.bat")
+            return env
+        except Exception as e:
+            self.log("ERROR", f"Failed to load vcvars env: {e}")
+            return {}
+        finally:
+            try:
+                Path(env_file).unlink(missing_ok=True)
+            except:
+                pass
+
+    def _ensure_compiler(self) -> bool:
+        """Check compiler. On Windows, auto-detects vcvarsall.bat if not in Developer Prompt."""
+        self.log("INFO", "Checking C++ compiler...")
+        system = platform.system()
+
+        if system == "Windows":
+            # Already in Developer Prompt?
+            rc, _, _ = self._run(["cl"], self.repo_root, check=False, silent=True)
+            if rc == 0:
+                self.log("OK", "MSVC (cl) found in PATH")
+                return True
+
+            # Try to find vcvarsall.bat
+            vcvars = self._find_vcvarsall()
+            if vcvars:
+                self.log("OK", f"MSVC found via vcvarsall.bat: {vcvars}")
+                return True
+
+            rc2, _, _ = self._run(["g++", "--version"], self.repo_root, check=False, silent=True)
+            if rc2 == 0:
+                self.log("OK", "GCC (g++) found")
+                return True
+
+            self.log("ERROR", "C++ Compiler NOT FOUND")
+            self.log("WARN", "  MSVC requires Visual Studio Build Tools.")
+            self.log("WARN", "  Download: https://visualstudio.microsoft.com/downloads/")
+            self.log("WARN", "  Select: 'Desktop development with C++' workload")
+            return False
+        else:
+            rc, _, _ = self._run(["g++", "--version"], self.repo_root, check=False, silent=True)
+            if rc == 0:
+                self.log("OK", "GCC (g++) found")
+                return True
+            rc2, _, _ = self._run(["clang++", "--version"], self.repo_root, check=False, silent=True)
+            if rc2 == 0:
+                self.log("OK", "Clang (clang++) found")
+                return True
+            self.log("ERROR", "C++ Compiler NOT FOUND")
+            self.log("WARN", "  Fix: sudo apt install build-essential")
+            return False
+
+    def _ensure_cmake(self) -> bool:
+        """Ensure CMake is available."""
+        self.log("INFO", "Checking CMake...")
+        rc, out, _ = self._run(["cmake", "--version"], self.repo_root, check=False, silent=True)
+        if rc == 0:
+            version_line = out.strip().splitlines()[0] if out.strip() else "unknown"
+            self.log("OK", f"CMake found: {version_line}")
+            return True
+        self.log("ERROR", "CMake NOT FOUND")
+        self.log("WARN", "  Download: https://cmake.org/download/")
+        return False
+
+    def _ensure_vcpkg_deps(self) -> bool:
+        """Install vcpkg dependencies from vcpkg.json."""
+        self.log("INFO", "Checking vcpkg dependencies...")
+        vcpkg_json = self.repo_root / "vcpkg.json"
+        if not vcpkg_json.exists():
+            self.log("SKIP", "vcpkg.json not found, skipping dependency install")
+            return True
+
+        vcpkg_root = os.environ.get("VCPKG_ROOT", "")
+        if not vcpkg_root:
+            self.log("ERROR", "VCPKG_ROOT not set after vcpkg install")
+            return False
+
+        vcpkg_exe = Path(vcpkg_root) / "vcpkg.exe" if platform.system() == "Windows" else Path(vcpkg_root) / "vcpkg"
+        if not vcpkg_exe.exists():
+            self.log("ERROR", f"vcpkg executable not found: {vcpkg_exe}")
+            return False
+
+        triplet = "x64-windows" if platform.system() == "Windows" else "x64-linux"
+        self.log("INSTALL", f"Installing vcpkg dependencies for {triplet}...")
+        rc, out, err = self._run(
+            [str(vcpkg_exe), "install", f"--triplet={triplet}"],
+            self.repo_root, check=False, timeout=600)
+        if rc == 0:
+            self.log("OK", "vcpkg dependencies installed")
+            return True
+        else:
+            self.log("ERROR", f"vcpkg install failed: {err}")
+            return False
+
+    def _ensure_all_prerequisites(self) -> bool:
+        """Run all prerequisite checks with auto-install."""
+        self.log("INFO", "=== ENSURING ALL PREREQUISITES ===")
+        ok = True
+        ok = self._ensure_vcpkg() and ok
+        ok = self._ensure_ninja() and ok
+        ok = self._ensure_compiler() and ok
+        ok = self._ensure_cmake() and ok
+        if ok:
+            ok = self._ensure_vcpkg_deps() and ok
+        if ok:
+            self.log("OK", "=== ALL PREREQUISITES READY ===")
+        else:
+            self.log("ERROR", "=== SOME PREREQUISITES MISSING ===")
+        return ok
 
     # ============ ACTIONS ============
 
@@ -357,8 +629,6 @@ class SubmoduleSyncGUI:
             with open(gm, "w") as f:
                 config.write(f)
             self.log("OK", ".gitmodules updated")
-
-            # Stage and commit
             self._run(["git", "add", ".gitmodules"], self.repo_root, check=False)
             rc, _, _ = self._run(
                 ["git", "commit", "-m", "chore(gitmodules): enforce branch = main for all submodules"],
@@ -385,7 +655,6 @@ class SubmoduleSyncGUI:
         else:
             self.log("ERROR", f"Init failed: {err}")
 
-        # Now checkout main branch in each submodule
         for sub in self.submodules:
             full = self.repo_root / sub["path"]
             if not (full / ".git").exists():
@@ -402,7 +671,7 @@ class SubmoduleSyncGUI:
             elif current != sub["branch"]:
                 self.log("WARN", f"{sub['name']}: Switching from '{current}' to '{sub['branch']}'...")
                 self._run(["git", "checkout", sub["branch"]], full, check=False)
-                self._run(["git", "branch", "--set-upstream-to", 
+                self._run(["git", "branch", "--set-upstream-to",
                           f"origin/{sub['branch']}", sub["branch"]], full, check=False)
 
     def on_github_to_local(self):
@@ -411,7 +680,6 @@ class SubmoduleSyncGUI:
     def _github_to_local(self):
         self.log("INFO", "=== GITHUB -> LOCAL SYNC ===")
 
-        # 1. Pull main repo
         self.log("INFO", "Pulling TheSeed (meta-repo)...")
         rc, out, _ = self._run(["git", "pull", "origin", "main"], self.repo_root, check=False)
         if rc == 0:
@@ -423,7 +691,19 @@ class SubmoduleSyncGUI:
             self.log("ERROR", "Meta-repo pull failed!")
             return
 
-        # 2. Update submodules (fetch + checkout)
+        # CRITICAL: Update submodules to the new pointers from meta-repo
+        self.log("INFO", "Updating submodules to new meta-repo pointers...")
+        rc, out, err = self._run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            self.repo_root, check=False)
+        if rc == 0:
+            if "Submodule path" in out:
+                self.log("OK", "Submodules updated to new pointers")
+            else:
+                self.log("SKIP", "Submodules already at correct commits")
+        else:
+            self.log("ERROR", f"Submodule update failed: {err}")
+
         for sub in self.submodules:
             full = self.repo_root / sub["path"]
             if not (full / ".git").exists():
@@ -431,11 +711,8 @@ class SubmoduleSyncGUI:
                 continue
 
             self.log("INFO", f"--- {sub['name']} ---")
-
-            # Fetch
             self._run(["git", "fetch", "origin"], full, check=False)
 
-            # Ensure on correct branch
             rc2, out2, _ = self._run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"], full, check=False, silent=True)
             current = out2.strip()
@@ -450,7 +727,6 @@ class SubmoduleSyncGUI:
                 self._run(["git", "branch", "--set-upstream-to",
                           f"origin/{sub['branch']}", sub["branch"]], full, check=False)
 
-            # Pull
             rc3, out3, _ = self._run(
                 ["git", "pull", "origin", sub["branch"]], full, check=False)
             if rc3 == 0:
@@ -461,7 +737,6 @@ class SubmoduleSyncGUI:
             else:
                 self.log("ERROR", f"  {sub['name']}: pull failed")
 
-        # 3. Update meta-repo pointer if submodules changed
         self._update_meta_pointer()
 
     def on_local_to_github(self):
@@ -470,7 +745,6 @@ class SubmoduleSyncGUI:
     def _local_to_github(self):
         self.log("INFO", "=== LOCAL -> GITHUB SYNC ===")
 
-        # 1. Commit local changes in submodules
         for sub in self.submodules:
             full = self.repo_root / sub["path"]
             if not (full / ".git").exists():
@@ -480,18 +754,16 @@ class SubmoduleSyncGUI:
             if out.strip():
                 self.log("WARN", f"{sub['name']}: local changes detected, committing...")
                 self._run(["git", "add", "-A"], full, check=False)
-                self._run(["git", "commit", "-m", 
+                self._run(["git", "commit", "-m",
                           f"auto: sync {sub['name']} {time.strftime('%Y-%m-%d %H:%M:%S')}"],
                          full, check=False)
                 self.log("OK", f"  {sub['name']}: committed")
 
-        # 2. Push submodules
         for sub in self.submodules:
             full = self.repo_root / sub["path"]
             if not (full / ".git").exists():
                 continue
 
-            # Check if ahead of origin
             rc, out, _ = self._run(
                 ["git", "log", f"origin/{sub['branch']}..{sub['branch']}", "--oneline"],
                 full, check=False, silent=True)
@@ -507,10 +779,8 @@ class SubmoduleSyncGUI:
             else:
                 self.log("SKIP", f"{sub['name']}: nothing to push")
 
-        # 3. Update meta-repo pointer
         self._update_meta_pointer()
 
-        # 4. Commit meta-repo local changes
         rc, out, _ = self._run(["git", "status", "--short"], self.repo_root, check=False, silent=True)
         if out.strip():
             self.log("WARN", "Meta-repo: local changes detected, committing...")
@@ -520,7 +790,6 @@ class SubmoduleSyncGUI:
                      self.repo_root, check=False)
             self.log("OK", "Meta-repo: committed")
 
-        # 5. Push meta-repo
         rc, out, _ = self._run(
             ["git", "log", "origin/main..main", "--oneline"],
             self.repo_root, check=False, silent=True)
@@ -549,18 +818,14 @@ class SubmoduleSyncGUI:
 
     def _update_meta_pointer(self):
         self.log("INFO", "Checking meta-repo submodule pointers...")
-
         changed = []
         for sub in self.submodules:
             full = self.repo_root / sub["path"]
             if not (full / ".git").exists():
                 continue
-
-            # Check if submodule has new commits vs what meta-repo knows
             rc, out, _ = self._run(
                 ["git", "diff", "--submodule", sub["path"]],
                 self.repo_root, check=False, silent=True)
-
             if out.strip():
                 changed.append(sub["path"])
 
@@ -568,14 +833,13 @@ class SubmoduleSyncGUI:
             self.log("SKIP", "No submodule pointer changes")
             return
 
-        self.log("WARN", f"Submodule pointer changes: {changed}")
+        self.log("WARN", f"Pointer changes: {changed}")
         for c in changed:
             self._run(["git", "add", c], self.repo_root, check=False)
 
         rc, _, _ = self._run(
             ["git", "commit", "-m", f"chore(submodule): sync pointers {time.strftime('%Y-%m-%d %H:%M:%S')}"],
             self.repo_root, check=False)
-
         if rc == 0:
             self.log("OK", "Meta-repo pointer updated and committed")
         else:
@@ -583,6 +847,113 @@ class SubmoduleSyncGUI:
 
     def on_refresh(self):
         self._thread(self._refresh_table)
+
+    # ============ BUILD & TEST ============
+
+    def on_build(self):
+        self._thread(self._build)
+
+    def _build(self):
+        preset = self.preset_var.get()
+        self.log("INFO", f"=== BUILD: {preset} ===")
+
+        # Auto-install prerequisites
+        if not self._ensure_all_prerequisites():
+            self.log("ERROR", "Prerequisites not met. Build aborted.")
+            return
+
+        build_dir = self.repo_root / "build" / preset.replace("-", "_")
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        # On Windows: if not in Developer Prompt, load vcvars env
+        extra_env = {}
+        if platform.system() == "Windows":
+            rc, _, _ = self._run(["cl"], self.repo_root, check=False, silent=True)
+            if rc != 0:
+                vcvars_path = self._find_vcvarsall()
+                if vcvars_path:
+                    vcvars_env = self._load_vcvars_env(vcvars_path)
+                    if vcvars_env:
+                        extra_env = vcvars_env
+                        # Merge into os.environ for subprocess
+                        os.environ.update(vcvars_env)
+                    else:
+                        self.log("ERROR", "Failed to load MSVC environment")
+                        return
+                else:
+                    self.log("ERROR", "MSVC environment not found. Install VS Build Tools.")
+                    return
+
+        # Configure
+        self.log("INFO", f"Configuring with preset: {preset}")
+        env = {**os.environ, **extra_env} if extra_env else None
+        rc, out, err = self._run_env(
+            ["cmake", "--preset", preset],
+            self.repo_root, env=env, check=False)
+        if rc != 0:
+            self.log("ERROR", f"CMake configure failed for preset '{preset}'")
+            return
+
+        # Build
+        self.log("INFO", "Building...")
+        rc, out, err = self._run_env(
+            ["cmake", "--build", f"build/{preset.replace('-', '_')}", "--parallel"],
+            self.repo_root, env=env, check=False, timeout=600)
+        if rc == 0:
+            self.log("OK", f"Build complete: {preset}")
+        else:
+            self.log("ERROR", f"Build failed: {preset}")
+
+    def _run_env(self, cmd, cwd, env=None, check=False, silent=False, timeout=60) -> tuple:
+        """Run command with optional extra environment variables."""
+        if not silent:
+            self.log("CMD", f"{' '.join(cmd)}  (in {cwd})")
+        try:
+            result = subprocess.run(cmd, cwd=cwd, capture_output=True,
+                                   text=True, check=False, timeout=timeout, env=env)
+            if result.stdout and not silent:
+                for line in result.stdout.strip().splitlines():
+                    self.log("INFO", f"  > {line}")
+            if result.stderr and not silent:
+                for line in result.stderr.strip().splitlines():
+                    if "warning" in line.lower():
+                        self.log("WARN", f"  ! {line}")
+                    else:
+                        self.log("INFO", f"  ! {line}")
+            return result.returncode, result.stdout, result.stderr
+        except subprocess.TimeoutExpired:
+            self.log("ERROR", f"  X Command timed out after {timeout}s")
+            return 1, "", "timeout"
+        except Exception as e:
+            self.log("ERROR", f"  X Exception: {e}")
+            return 1, "", str(e)
+
+    def on_test(self):
+        self._thread(self._test)
+
+    def _test(self):
+        test_filter = self.test_var.get()
+        preset = self.preset_var.get()
+        build_dir = self.repo_root / "build" / preset.replace("-", "_")
+
+        self.log("INFO", f"=== TEST: {test_filter} (preset: {preset}) ===")
+
+        if not build_dir.exists():
+            self.log("WARN", f"Build dir not found: {build_dir}. Run Build first.")
+            return
+
+        regex = ".*" if test_filter == "all" else test_filter
+
+        self.log("INFO", f"Running ctest -R '{regex}'")
+        rc, out, err = self._run(
+            ["ctest", "--test-dir", str(build_dir),
+             "-R", regex, "--output-on-failure", "-j", str(os.cpu_count() or 4)],
+            self.repo_root, check=False, timeout=300)
+
+        if rc == 0:
+            self.log("OK", f"Tests passed: {test_filter}")
+        else:
+            self.log("ERROR", f"Tests failed: {test_filter}")
 
     # ============ AUTO-SYNC ============
 
@@ -605,7 +976,7 @@ class SubmoduleSyncGUI:
             except ValueError:
                 interval = 300
 
-            self.log("INFO", f"Auto-Sync cycle starting...")
+            self.log("INFO", "Auto-Sync cycle starting...")
             self._full_sync()
             self.log("INFO", f"Auto-Sync cycle complete. Sleeping {interval//60} min...")
 

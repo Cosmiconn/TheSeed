@@ -7,6 +7,7 @@
     "fmt",
     "nlohmann-json",
     "rapidcheck",
+    "nanobench",
     { "name": "tracy", "platform": "!uwp" }
   ],
   "builtin-baseline": "dfcb04008a5a9e038a4ae0d1af57909e30d21359"
