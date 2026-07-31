@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -11,6 +12,22 @@
 #include <seed/serialize.h>
 #include <seed/diagnostics.h>
 #include <seed/profiling.h>
+
+// ---------------------------------------------------------------------------
+// Helper: locate project root from any build-directory working dir
+// ---------------------------------------------------------------------------
+static std::filesystem::path findProjectRoot() {
+    std::filesystem::path p = std::filesystem::current_path();
+    for (int i = 0; i < 4; ++i) {
+        if (std::filesystem::exists(p / "CMakePresets.json")) {
+            return p;
+        }
+        p = p.parent_path();
+    }
+    return std::filesystem::current_path(); // fallback
+}
+
+static const std::filesystem::path kProjectRoot = findProjectRoot();
 
 TEST_CASE("MetaBuild_PublicHeaders_Compile") {
     // This test verifies that all public headers compile together
@@ -47,12 +64,12 @@ TEST_CASE("MetaBuild_Diagnostics_Timeline") {
 // ============================================================================
 
 TEST_CASE("MetaBuild_CMakePresets_Exists") {
-    std::ifstream presets("CMakePresets.json");
+    std::ifstream presets(kProjectRoot / "CMakePresets.json");
     REQUIRE(presets.good());
 }
 
 TEST_CASE("MetaBuild_CMakePresets_HasRequiredPresets") {
-    std::ifstream presets("CMakePresets.json");
+    std::ifstream presets(kProjectRoot / "CMakePresets.json");
     REQUIRE(presets.good());
 
     std::ostringstream ss;
@@ -66,12 +83,12 @@ TEST_CASE("MetaBuild_CMakePresets_HasRequiredPresets") {
 }
 
 TEST_CASE("MetaBuild_vcpkgJson_Exists") {
-    std::ifstream vcpkg("vcpkg.json");
+    std::ifstream vcpkg(kProjectRoot / "vcpkg.json");
     REQUIRE(vcpkg.good());
 }
 
 TEST_CASE("MetaBuild_vcpkgJson_HasRequiredDeps") {
-    std::ifstream vcpkg("vcpkg.json");
+    std::ifstream vcpkg(kProjectRoot / "vcpkg.json");
     REQUIRE(vcpkg.good());
 
     std::ostringstream ss;
@@ -84,22 +101,22 @@ TEST_CASE("MetaBuild_vcpkgJson_HasRequiredDeps") {
 }
 
 TEST_CASE("MetaBuild_RootCMake_Exists") {
-    std::ifstream cmake("CMakeLists.txt");
+    std::ifstream cmake(kProjectRoot / "CMakeLists.txt");
     REQUIRE(cmake.good());
 }
 
 TEST_CASE("MetaBuild_SeedCoreCMake_Exists") {
-    std::ifstream cmake("submodules/seed-core/CMakeLists.txt");
+    std::ifstream cmake(kProjectRoot / "submodules/seed-core/CMakeLists.txt");
     REQUIRE(cmake.good());
 }
 
 TEST_CASE("MetaBuild_Scripts_Exist") {
-    std::ifstream build_sh("scripts/build.sh");
+    std::ifstream build_sh(kProjectRoot / "scripts/build.sh");
     REQUIRE(build_sh.good());
 
-    std::ifstream test_sh("scripts/test.sh");
+    std::ifstream test_sh(kProjectRoot / "scripts/test.sh");
     REQUIRE(test_sh.good());
 
-    std::ifstream setup_sh("scripts/setup.sh");
+    std::ifstream setup_sh(kProjectRoot / "scripts/setup.sh");
     REQUIRE(setup_sh.good());
 }
