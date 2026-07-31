@@ -171,16 +171,56 @@ Das ermoeglicht:
 **Konsequenzen:** Root-Manifest muss nicht alle Dependencies
 wiederholen (Manifest-Inheritance via vcpkg).
 
+### 10. `barrier.h/.cpp` → in `job_system.h/.cpp` integriert
+
+**Roadmap:** `src/core/jobs/barrier.h/.cpp` als eigenes Modul  
+**Tatsaechlich:** `barrier()` als Member-Funktion in `JobSystem`
+
+**Begruendung:** Die Barrier-Logik (Warten auf Abschluss aller
+Tasks im Graphen) ist eng mit dem JobSystem gekoppelt. Eine
+separate Datei wuerde nur eine duenne Wrapper-Schicht um
+`waitForAll()` erzeugen. Die Integration in `JobSystem`:
+- Vermeidet zusaetzliche Translation Unit
+- Ermoeglicht direkten Zugriff auf interne Task-Queues
+- Reduziert API-Oberflaeche (ein `js.barrier()` statt
+  `Barrier b(&js); b.wait();`)
+
+**Konsequenzen:** Keine Breaking Changes – die Public API
+bleibt `JobSystem::barrier()`.
+
+---
+
+### 11. Benchmarks konsolidiert (zwei Ordner → einer mit nanobench)
+
+**Roadmap:** Benchmarks in `benchmarks/` (Submodule-Root)  
+**Tatsaechlich:** Alle Benchmarks in `tests/benchmarks/` mit nanobench
+
+**Begruendung:** Es existierten zwei Benchmark-Verzeichnisse:
+- `benchmarks/` – 3 Dateien mit nanobench, eigenes CMakeLists.txt
+- `tests/benchmarks/` – 8 Dateien mit custom chrono/printf, inline
+  im `tests/CMakeLists.txt` als einzelne Targets
+
+Konsolidierung nach `tests/benchmarks/`:
+- Einheitliches Framework (nanobench) fuer alle Benchmarks
+- Ein einzelnes Executable (`seed_benchmarks`) statt 7+ separate
+- Weniger CMake-Code, schnelleres Build-System
+- Konsistent mit der Roadmap-Forderung "nanobench"
+
+**Konsequenzen:** Die 4 spezifischen Allocator-Benchmarks
+(Block, Pool, Arena, Chunk) wurden in `bench_memory.cpp`
+zusammengefuehrt. `bench_integration.cpp` wurde entfernt,
+da seine Szenarien in Unit- und Gate-Tests abgedeckt sind.
+
 ---
 
 ## Nicht implementiert (bewusst zurueckgestellt)
 
 | Deliverable | Grund | Plan |
 |-------------|-------|------|
-| `tests/unit/build/test_cmake.cpp` | Erstellt, aber Meta-Level | P0-Release |
+| `tests/unit/build/test_cmake.cpp` | In `tests/integration/test_meta_build.cpp` integriert | ✅ Erledigt |
 | Property-Tests fuer Memory | rapidcheck-Integration komplex | P0-Release |
 | Fuzz-Tests fuer Memory | libFuzzer erfordert Clang | P0-Release |
-| Benchmarks fuer Math | Erstellt (`bench_math.cpp`) | P0-Release |
+| Benchmarks fuer Math | Erstellt (`bench_math.cpp` mit nanobench) | ✅ Erledigt |
 
 ---
 

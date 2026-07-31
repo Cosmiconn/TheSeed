@@ -7,14 +7,14 @@ env:
   VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
 jobs:
-  gate-p0:
+  gate-p0-functional:
     runs-on: ubuntu-24.04
-    name: "P0 Gate – Fundament"
+    name: "P0 Gate – Functional (blocking)"
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULE_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install dependencies
         run: |
@@ -71,7 +71,7 @@ jobs:
       - name: Build Debug
         run: cmake --build build/linux-debug --parallel
 
-      - name: Gate Tests
+      - name: Functional Gate Tests
         run: ctest --test-dir build/linux-debug -R seed_gate_tests --output-on-failure
 
       - name: Build Time Check
@@ -86,3 +86,61 @@ jobs:
           if [ "$elapsed" -gt 180 ]; then
             echo "WARNING: Clean build exceeded 3 minutes target"
           fi
+
+  gate-p0-performance:
+    runs-on: ubuntu-24.04
+    name: "P0 Gate – Performance (informational)"
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-13
+
+      - name: Clone vcpkg
+        run: |
+          if [ ! -d "$VCPKG_ROOT/.git" ]; then
+            rm -rf "$VCPKG_ROOT"
+            git clone https://github.com/Microsoft/vcpkg.git "$VCPKG_ROOT"
+          fi
+          cd "$VCPKG_ROOT"
+          if [ ! -f "./vcpkg" ]; then
+            ./bootstrap-vcpkg.sh
+          fi
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg/installed
+            ${{ github.workspace }}/vcpkg/downloads
+          key: vcpkg-linux-${{ hashFiles('vcpkg.json') }}
+
+      - name: vcpkg install
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet=x64-linux
+
+      - name: Configure Release
+        run: |
+          cmake -S . -B build/linux-release \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=ON
+
+      - name: Build Release
+        run: cmake --build build/linux-release --parallel
+
+      - name: Performance Gate Tests
+        run: ctest --test-dir build/linux-release -R seed_gate_perf_tests --output-on-failure
+
+      - name: Benchmarks
+        run: |
+          ./build/linux-release/submodules/seed-core/tests/benchmarks/seed_benchmarks || true

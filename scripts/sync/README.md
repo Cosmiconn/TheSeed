@@ -27,14 +27,10 @@ python3 scripts/sync/theseed_sync_gui.py
 - **Full Sync** - Complete bidirectional sync + pointer update
 - **Auto-Sync** - Runs Full Sync automatically every N minutes
 
-**Build:**
-- Preset selector: `linux-release`, `linux-debug`, `linux-debug-sanitizer`, `windows-release`
-- Runs `cmake --preset <preset>` then `cmake --build --parallel`
-
-**Test:**
-- Filter selector: `all`, `unit`, `integration`, `property`, `fuzz`, `benchmark`
-- Gate tests: `gate_p0` through `gate_p7`
-- Runs `ctest -R <filter> --output-on-failure -j$(nproc)`
+**Build & Test:**
+- **Auto-Install** - Missing dependencies (vcpkg, Ninja) are installed automatically
+- **Preset selector** - OS-aware: Windows shows `windows-release/debug`, Linux shows `linux-release/debug`
+- **Test filters** - `all`, `unit`, `integration`, `property`, `fuzz`, `benchmark`, `gate_p0`..`gate_p7`
 
 ---
 
@@ -65,19 +61,18 @@ python3 scripts/sync/theseed_sync.py --auto-sync --interval 5
 ### Build Commands
 
 ```bash
-# Build with default preset (linux-release)
+# Build with auto-install of missing dependencies
 python3 scripts/sync/theseed_sync.py --build
 
 # Build with specific preset
-python3 scripts/sync/theseed_sync.py --build --preset linux-debug-sanitizer
+python3 scripts/sync/theseed_sync.py --build --preset windows-debug
 ```
 
-**Available Presets** (from CMakePresets.json):
+**Available Presets** (OS-aware):
 | Preset | Platform | Type | Sanitizer |
 |--------|----------|------|-----------|
 | `linux-release` | Linux | Release | None |
-| `linux-debug` | Linux | Debug | None |
-| `linux-debug-sanitizer` | Linux | Debug | ASan+UBSan |
+| `linux-debug` | Linux | Debug | ASan+UBSan |
 | `windows-release` | Windows | Release | None |
 | `windows-debug` | Windows | Debug | ASan+UBSan |
 
@@ -92,12 +87,9 @@ python3 scripts/sync/theseed_sync.py --test --test-filter unit
 
 # Run gate tests for Phase 0
 python3 scripts/sync/theseed_sync.py --test --test-filter gate_p0
-
-# Run integration tests with sanitizer preset
-python3 scripts/sync/theseed_sync.py --test --preset linux-debug-sanitizer --test-filter integration
 ```
 
-**Available Test Filters** (from Testing Strategy / Roadmap):
+**Available Test Filters**:
 | Filter | Description |
 |--------|-------------|
 | `all` | All tests |
@@ -117,9 +109,23 @@ python3 scripts/sync/theseed_sync.py --test --preset linux-debug-sanitizer --tes
 
 ---
 
+## Auto-Install Behavior
+
+When you click **Build** or run `--build`, the tool automatically:
+
+1. **Checks vcpkg** - If missing, clones from GitHub and bootstraps
+2. **Checks Ninja** - If missing, installs via `pip install ninja`
+3. **Checks Compiler** - MSVC (Windows) or GCC/Clang (Linux). Cannot auto-install MSVC - shows download link
+4. **Checks CMake** - Must be installed manually if missing
+5. **Installs vcpkg dependencies** - Runs `vcpkg install` for the target triplet
+
+If any step fails, the build is aborted with clear error messages.
+
+---
+
 ## Bash Wrappers (Legacy)
 
-The bash scripts now delegate to the Python tools:
+The bash scripts delegate to the Python tools:
 
 ```bash
 # Auto-sync daemon
@@ -139,17 +145,6 @@ The bash scripts now delegate to the Python tools:
 | Detached HEAD fix | Automatically checks out `main` branch |
 | Pointer update | Commits submodule pointer changes in meta-repo |
 | Error visibility | All commands logged with color-coded output |
-| Timeout protection | Build: 10min, Test: 5min, Sync: 2min |
+| Timeout protection | Build: 10min, Test: 5min, Sync: 2min, vcpkg: 10min |
 | Cross-platform | Python + tkinter runs on Windows, Linux, macOS |
-
----
-
-## Roadmap Conformance
-
-| Roadmap Spec | Implementation |
-|--------------|----------------|
-| CMake Presets (M1) | `linux-release`, `linux-debug`, `linux-debug-sanitizer`, `windows-release` |
-| Test Matrix (M1-M6) | `unit`, `integration`, `property`, `fuzz`, `benchmark` |
-| Phase Gates (Master) | `gate_p0` - `gate_p7` |
-| Submodule branch tracking | `branch = main` in `.gitmodules` |
-| CI/CD Matrix | Presets match `ci.yml` and `nightly.yml` configurations |
+| No CMake changes | Tool never modifies CMakeLists.txt or CMakePresets.json |

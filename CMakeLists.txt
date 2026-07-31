@@ -31,7 +31,6 @@ endif()
 
 # Options
 option(SEED_BUILD_TESTS "Build tests" ON)
-option(SEED_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(SEED_ENABLE_SANITIZERS "Enable sanitizers" OFF)
 option(SEED_ENABLE_TRACY "Enable Tracy profiling" OFF)
 

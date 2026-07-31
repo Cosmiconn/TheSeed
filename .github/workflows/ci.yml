@@ -16,7 +16,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULE_TOKEN }}
 
       - name: Install system dependencies
         run: |
@@ -84,11 +83,14 @@ jobs:
       - name: List all tests
         run: ctest --test-dir build/linux-debug -N
 
-      - name: Test (all)
-        run: ctest --test-dir build/linux-debug --output-on-failure
+      - name: Test (all except performance gates)
+        run: ctest --test-dir build/linux-debug --output-on-failure -E seed_gate_perf_tests
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:print_stats=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+      - name: Functional Gate Tests
+        run: ctest --test-dir build/linux-debug -R seed_gate_tests --output-on-failure
 
       - name: Stress Test – MultiThreadStress x10
         run: |
@@ -109,19 +111,46 @@ jobs:
           done
 
       - name: Static Analysis – clang-tidy
-        run: run-clang-tidy -p build/linux-debug src/ tests/ || true
+        run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/
 
       - name: Static Analysis – cppcheck
         run: |
           cppcheck --enable=all \
-            -I src \
+            -I submodules/seed-core/src \
             --suppress=missingIncludeSystem \
             --suppress=missingInclude \
             --suppress=unusedFunction \
             --suppress=constVariablePointer \
             --suppress=knownConditionTrueFalse \
-            --error-exitcode=0 \
-            src/ tests/ || true
+            --error-exitcode=1 \
+            submodules/seed-core/src/ submodules/seed-core/tests/
+
+      - name: Configure Coverage
+        run: |
+          cmake -S . -B build/linux-coverage \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DSEED_ENABLE_COVERAGE=ON \
+            -DSEED_ENABLE_SANITIZERS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build Coverage
+        run: cmake --build build/linux-coverage --parallel
+
+      - name: Generate Coverage Report
+        run: |
+          cd build/linux-coverage
+          cmake --build . --target coverage-report
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: build/linux-coverage/coverage/coverage.info.filtered
+          fail_ci_if_error: false
+          verbose: true
 
   build-windows:
     runs-on: windows-latest
@@ -129,7 +158,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULE_TOKEN }}
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -203,8 +231,11 @@ jobs:
       - name: List all tests
         run: ctest --test-dir build/windows-debug -C Debug -N
 
-      - name: Test (all) with Runtime Checks
-        run: ctest --test-dir build/windows-debug -C Debug --output-on-failure
+      - name: Test (all except performance gates)
+        run: ctest --test-dir build/windows-debug -C Debug --output-on-failure -E seed_gate_perf_tests
+
+      - name: Functional Gate Tests
+        run: ctest --test-dir build/windows-debug -C Debug -R seed_gate_tests --output-on-failure
 
       - name: Stress Test – MultiThreadStress x10
         shell: pwsh

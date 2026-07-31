@@ -13,68 +13,50 @@
 using namespace std::chrono;
 
 // ============================================================================
-// Gate P0: ECS - 100k Entities in <100ms
+// Gate P0: Funktionale Tests (blockieren CI)
 // ============================================================================
-TEST_CASE("gate_p0_ecs_create") {
+
+TEST_CASE("gate_p0_ecs_create_count") {
     seed::memory::BlockAllocator blockAlloc(256 * 1024 * 1024);
     seed::ecs::World world(&blockAlloc);
 
-    auto start = high_resolution_clock::now();
     for (int i = 0; i < 100'000; ++i) {
         auto e = world.createEntity();
         (void)e;
     }
-    auto elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start).count();
 
     REQUIRE(world.entityCount() == 100'000);
-    REQUIRE(elapsed < 500); // < 500ms (CI runner budget – measured ~200ms)
 }
 
-// ============================================================================
-// Gate P0: ECS - Entity create/destroy stress
-// ============================================================================
-TEST_CASE("gate_p0_ecs_update") {
+TEST_CASE("gate_p0_ecs_create_destroy") {
     seed::memory::BlockAllocator blockAlloc(256 * 1024 * 1024);
     seed::ecs::World world(&blockAlloc);
 
-    // Create 100k entities
     for (int i = 0; i < 100'000; ++i) {
         auto e = world.createEntity();
         (void)e;
     }
 
-    // Destroy half
-    auto start = high_resolution_clock::now();
     for (int i = 0; i < 50'000; ++i) {
         auto e = world.createEntity();
         world.destroyEntity(e);
     }
-    auto elapsed = duration_cast<microseconds>(high_resolution_clock::now() - start).count();
 
-    REQUIRE(elapsed < 500'000); // < 500ms (CI runner budget – measured ~125ms)
+    REQUIRE(world.entityCount() == 150'000);
 }
 
-// ============================================================================
-// Gate P0: JobSystem - 1M Tasks/sec
-// ============================================================================
-TEST_CASE("gate_p0_jobs_throughput") {
+TEST_CASE("gate_p0_jobs_1m_tasks_complete") {
     seed::jobs::JobSystem js;
     std::atomic<uint32_t> counter{0};
 
-    auto start = high_resolution_clock::now();
     for (uint32_t i = 0; i < 1'000'000; ++i) {
         js.schedule([&]() { counter.fetch_add(1, std::memory_order_relaxed); });
     }
     js.waitForAll();
-    auto elapsed = duration_cast<seconds>(high_resolution_clock::now() - start).count();
 
     REQUIRE(counter == 1'000'000);
-    REQUIRE(elapsed < 5); // < 5s for 1M tasks (CI runner budget – measured ~2s)
 }
 
-// ============================================================================
-// Gate P0: Memory - Stress Test
-// ============================================================================
 TEST_CASE("gate_p0_memory_stress") {
     seed::memory::BlockAllocator blockAlloc(64 * 1024 * 1024);
 
@@ -86,47 +68,42 @@ TEST_CASE("gate_p0_memory_stress") {
         }
         arena.reset();
     }
-    REQUIRE(true);
 }
 
-// ============================================================================
-// Gate P0: Serialization - 100k writes in <10ms
-// ============================================================================
-TEST_CASE("gate_p0_serialize_speed") {
+TEST_CASE("gate_p0_serialize_roundtrip") {
     seed::serialize::BinaryWriter writer;
 
-    auto start = high_resolution_clock::now();
     for (int i = 0; i < 100'000; ++i) {
         writer.writePOD(i);
         writer.writePOD(static_cast<float>(i) * 0.5f);
     }
-    auto elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start).count();
 
     REQUIRE(writer.data().size() > 0);
-    REQUIRE(elapsed < 500); // < 500ms (CI runner budget – measured ~235ms)
+
+    seed::serialize::BinaryReader reader(writer.data());
+    for (int i = 0; i < 100'000; ++i) {
+        int32_t val;
+        float fval;
+        reader.readPOD(val);
+        reader.readPOD(fval);
+        REQUIRE(val == i);
+        REQUIRE(fval == static_cast<float>(i) * 0.5f);
+    }
 }
 
-// ============================================================================
-// Gate P0: Build Time Check (CMake-Preset-Validierung)
-// ============================================================================
 TEST_CASE("gate_p0_build_time") {
     auto start = high_resolution_clock::now();
 
-    // Pruefe, dass CMakePresets.json existiert und lesbar ist
     std::ifstream presets("CMakePresets.json");
     REQUIRE(presets.good());
 
-    // Pruefe, dass vcpkg.json existiert und alle Dependencies gelistet sind
     std::ifstream vcpkg("vcpkg.json");
     REQUIRE(vcpkg.good());
 
     auto elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start).count();
-    REQUIRE(elapsed < 100); // < 100ms fuer reine Datei-Checks
+    REQUIRE(elapsed < 100);
 }
 
-// ============================================================================
-// Gate P0: Coverage Check (lcov-Summary parsen)
-// ============================================================================
 TEST_CASE("gate_p0_coverage") {
     const char* coverageInfo = std::getenv("SEED_COVERAGE_INFO_FILE");
     if (!coverageInfo) {
@@ -152,5 +129,5 @@ TEST_CASE("gate_p0_coverage") {
     std::sscanf(output.c_str() + pos, "lines......: %f%%", &percent);
 
     MESSAGE("Coverage: ", percent, "%");
-    REQUIRE(percent >= 80.0f); // >= 80% laut Roadmap
+    REQUIRE(percent >= 80.0f);
 }

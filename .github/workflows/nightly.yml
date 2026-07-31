@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          token: ${{ secrets.SUBMODULE_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install system dependencies
         run: |
@@ -96,6 +96,8 @@ jobs:
         run: |
           # Run Valgrind on every test binary. Each binary is invoked once;
           # doctest runs all test cases inside it automatically.
+          # NOTE: Performance tests are excluded because Valgrind slows code
+          # by 10-50x, making timing thresholds meaningless.
           FAILED=0
           for binary in \
             "build/linux-debug-valgrind/submodules/seed-core/tests/seed_tests" \
@@ -113,8 +115,9 @@ jobs:
             fi
             name=$(basename "$binary")
             echo "=== Valgrind: $name ==="
+            # Exclude performance/timing tests; keep functional/memory tests
             valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes \
-              --error-exitcode=42 "$binary" || {
+              --error-exitcode=42 "$binary" -tc="!*Performance*" -tc="!*speed*" -tc="!*Throughput*" -tc="!*Stress*" || {
               echo "ERROR: Valgrind detected issues in $name"
               FAILED=1
             }
@@ -125,7 +128,7 @@ jobs:
           fi
 
       - name: Static Analysis – clang-tidy
-        run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/ || true
+        run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
