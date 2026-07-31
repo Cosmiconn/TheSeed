@@ -13,6 +13,7 @@
 #ifdef _WIN32
 #define popen _popen
 #define pclose _pclose
+#pragma warning(disable: 4996)  // getenv, sscanf deprecation on MSVC
 #endif
 
 using namespace std::chrono;
