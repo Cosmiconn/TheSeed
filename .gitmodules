@@ -1,10 +1,10 @@
 [submodule "submodules/seed-core"]
 	path = submodules/seed-core
-	url = https://github.com/seed-core.git
+	url = https://github.com/cosmiconn/seed-core.git
 	branch = main
 [submodule "submodules/seed-network"]
 	path = submodules/seed-network
-	url = https://github.com/theseed/seed-network.git
+	url = https://github.com/cosmiconn/seed-network.git
 	branch = main
 [submodule "submodules/seed-renderer"]
 	path = submodules/seed-renderer
