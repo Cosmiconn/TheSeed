@@ -10,6 +10,11 @@
 #include <cstdio>
 #include <fstream>
 
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
+
 using namespace std::chrono;
 
 // ============================================================================
@@ -82,10 +87,8 @@ TEST_CASE("gate_p0_serialize_roundtrip") {
 
     seed::serialize::BinaryReader reader(writer.data());
     for (int i = 0; i < 100'000; ++i) {
-        int32_t val;
-        float fval;
-        reader.readPOD(val);
-        reader.readPOD(fval);
+        int32_t val = reader.readPOD<int32_t>();
+        float fval = reader.readPOD<float>();
         REQUIRE(val == i);
         REQUIRE(fval == static_cast<float>(i) * 0.5f);
     }
