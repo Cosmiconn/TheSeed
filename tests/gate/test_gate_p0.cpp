@@ -19,21 +19,10 @@
 
 using namespace std::chrono;
 
-// ---------------------------------------------------------------------------
-// Helper: locate project root from any build-directory working dir
-// ---------------------------------------------------------------------------
-static std::filesystem::path findProjectRoot() {
-    std::filesystem::path p = std::filesystem::current_path();
-    for (int i = 0; i < 4; ++i) {
-        if (std::filesystem::exists(p / "CMakePresets.json")) {
-            return p;
-        }
-        p = p.parent_path();
-    }
-    return std::filesystem::current_path(); // fallback
-}
-
-static const std::filesystem::path kProjectRoot = findProjectRoot();
+#ifndef SEED_SOURCE_DIR
+#define SEED_SOURCE_DIR "."
+#endif
+static const std::filesystem::path kProjectRoot = SEED_SOURCE_DIR;
 
 // ============================================================================
 // Gate P0: Funktionale Tests (blockieren CI)
