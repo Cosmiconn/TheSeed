@@ -113,7 +113,21 @@ jobs:
           done
 
       - name: Static Analysis – clang-tidy
-        run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/
+        run: |
+          # Configure a dedicated Clang build for clang-tidy to avoid GCC-only
+          # warning flags (-Wduplicated-branches, -Wlogical-op, etc.) that
+          # clang-tidy-18 treats as hard errors when reading compile_commands.json
+          # from a GCC build.
+          cmake -S . -B build/clang-tidy \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          run-clang-tidy -p build/clang-tidy submodules/seed-core/src/ submodules/seed-core/tests/
 
       - name: Static Analysis – cppcheck
         run: |
