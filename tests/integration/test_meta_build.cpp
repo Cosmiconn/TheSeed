@@ -54,8 +54,11 @@ TEST_CASE("MetaBuild_CMakePresets_HasRequiredPresets") {
     std::ifstream presets("CMakePresets.json");
     REQUIRE(presets.good());
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnull-dereference"
     std::string content((std::istreambuf_iterator<char>(presets)),
                          std::istreambuf_iterator<char>());
+#pragma GCC diagnostic pop
 
     REQUIRE(content.find("linux-debug") != std::string::npos);
     REQUIRE(content.find("linux-release") != std::string::npos);
@@ -72,8 +75,11 @@ TEST_CASE("MetaBuild_vcpkgJson_HasRequiredDeps") {
     std::ifstream vcpkg("vcpkg.json");
     REQUIRE(vcpkg.good());
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnull-dereference"
     std::string content((std::istreambuf_iterator<char>(vcpkg)),
                          std::istreambuf_iterator<char>());
+#pragma GCC diagnostic pop
 
     REQUIRE(content.find("doctest") != std::string::npos);
     REQUIRE(content.find("spdlog") != std::string::npos);
