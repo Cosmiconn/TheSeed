@@ -10,13 +10,14 @@
 using namespace seed::math;
 
 // ---------------------------------------------------------------------------
-// Helper: near-equal comparison for floats
+// Helper: near-equal comparison for floats (test-local wrappers to avoid
+// ambiguity with seed::math::nearEqual / seed::math::nearZero)
 // ---------------------------------------------------------------------------
-inline bool nearEqual(float a, float b, float eps = 1e-5f) {
+inline bool testNearEqual(float a, float b, float eps = 1e-5f) {
     return std::abs(a - b) < eps;
 }
 
-inline bool nearZero(float a, float eps = 1e-5f) {
+inline bool testNearZero(float a, float eps = 1e-5f) {
     return std::abs(a) < eps;
 }
 
@@ -26,9 +27,9 @@ TEST_CASE("Meta_Property_Math_Vec3AdditionCommutative") {
         Vec3 b(*rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>());
         Vec3 s1 = a + b;
         Vec3 s2 = b + a;
-        RC_ASSERT(nearEqual(s1.x, s2.x));
-        RC_ASSERT(nearEqual(s1.y, s2.y));
-        RC_ASSERT(nearEqual(s1.z, s2.z));
+        RC_ASSERT(testNearEqual(s1.x, s2.x));
+        RC_ASSERT(testNearEqual(s1.y, s2.y));
+        RC_ASSERT(testNearEqual(s1.z, s2.z));
     });
 }
 
@@ -39,18 +40,18 @@ TEST_CASE("Meta_Property_Math_Vec3ScalarDistributive") {
         float s = *rc::gen::arbitrary<float>();
         Vec3 left = (a + b) * s;
         Vec3 right = a * s + b * s;
-        RC_ASSERT(nearEqual(left.x, right.x));
-        RC_ASSERT(nearEqual(left.y, right.y));
-        RC_ASSERT(nearEqual(left.z, right.z));
+        RC_ASSERT(testNearEqual(left.x, right.x));
+        RC_ASSERT(testNearEqual(left.y, right.y));
+        RC_ASSERT(testNearEqual(left.z, right.z));
     });
 }
 
 TEST_CASE("Meta_Property_Math_Vec3NormalizeLengthOne") {
     rc::check("length(normalize(v)) == 1", []() {
         Vec3 v(*rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>(), *rc::gen::arbitrary<float>());
-        RC_PRE(!nearZero(lengthSq(v)));
+        RC_PRE(!testNearZero(lengthSq(v)));
         Vec3 n = normalize(v);
-        RC_ASSERT(nearEqual(length(n), 1.0f));
+        RC_ASSERT(testNearEqual(length(n), 1.0f));
     });
 }
 
@@ -61,7 +62,7 @@ TEST_CASE("Meta_Property_Math_Mat4Identity") {
         Mat4 i = Mat4::identity();
         Mat4 r = m * i;
         for (int j = 0; j < 16; ++j) {
-            RC_ASSERT(nearEqual(r.m[j], m.m[j]));
+            RC_ASSERT(testNearEqual(r.m[j], m.m[j]));
         }
     });
 }
