@@ -4,6 +4,7 @@ add_executable(seed_gate_tests
 )
 target_link_libraries(seed_gate_tests PRIVATE seed_core)
 seed_apply_warnings(seed_gate_tests)
+target_compile_definitions(seed_gate_tests PRIVATE SEED_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME seed_gate_tests COMMAND seed_gate_tests)
 
 # Gate Tests – Performance (informational, blockieren CI NICHT)

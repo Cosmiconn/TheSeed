@@ -9,6 +9,7 @@ add_executable(seed_integration_tests
 
 target_link_libraries(seed_integration_tests PRIVATE seed_core doctest::doctest)
 seed_apply_warnings(seed_integration_tests)
+target_compile_definitions(seed_integration_tests PRIVATE SEED_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 if(SEED_ENABLE_SANITIZERS)
     seed_apply_sanitizers(seed_integration_tests)

@@ -13,21 +13,10 @@
 #include <seed/diagnostics.h>
 #include <seed/profiling.h>
 
-// ---------------------------------------------------------------------------
-// Helper: locate project root from any build-directory working dir
-// ---------------------------------------------------------------------------
-static std::filesystem::path findProjectRoot() {
-    std::filesystem::path p = std::filesystem::current_path();
-    for (int i = 0; i < 4; ++i) {
-        if (std::filesystem::exists(p / "CMakePresets.json")) {
-            return p;
-        }
-        p = p.parent_path();
-    }
-    return std::filesystem::current_path(); // fallback
-}
-
-static const std::filesystem::path kProjectRoot = findProjectRoot();
+#ifndef SEED_SOURCE_DIR
+#define SEED_SOURCE_DIR "."
+#endif
+static const std::filesystem::path kProjectRoot = SEED_SOURCE_DIR;
 
 TEST_CASE("MetaBuild_PublicHeaders_Compile") {
     // This test verifies that all public headers compile together

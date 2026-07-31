@@ -170,6 +170,53 @@ def find_repo_root() -> Path:
     sys.exit(1)
 
 
+def resolve_github_user() -> str:
+    """Get GitHub username from profile or environment."""
+    user = get_profile_value("github_user", "")
+    if user:
+        return user
+    user = os.environ.get("THE_SEED_GITHUB_USER", "")
+    if user:
+        return user
+    return ""
+
+
+def resolve_auth_method() -> str:
+    """Get authentication method from profile or environment."""
+    method = get_profile_value("auth_method", "")
+    if method:
+        return method
+    method = os.environ.get("THE_SEED_AUTH_METHOD", "token")
+    return method
+
+
+def resolve_submodule_url(raw_url: str) -> str:
+    """Replace __GITHUB_USER__ placeholder and add token if needed."""
+    github_user = resolve_github_user()
+    if not github_user:
+        log("ERROR", "GitHub user not configured. Set 'github_user' in sync profile")
+        log("ERROR", f"  Profile: {PROFILE_PATH}")
+        log("ERROR", "  Or set THE_SEED_GITHUB_USER environment variable")
+        return raw_url
+
+    url = raw_url.replace("__GITHUB_USER__", github_user)
+
+    auth_method = resolve_auth_method()
+    token = os.environ.get("SUBMODULE_TOKEN", "")
+
+    if auth_method == "token" and token:
+        # Insert token into HTTPS URL
+        if url.startswith("https://github.com/"):
+            url = url.replace("https://github.com/", f"https://{token}@github.com/")
+    elif auth_method == "ssh":
+        # Convert HTTPS to SSH
+        if url.startswith("https://github.com/"):
+            url = url.replace("https://github.com/", "git@github.com:")
+    # auth_method == "none" keeps plain HTTPS (public repos only)
+
+    return url
+
+
 def get_submodules(repo_root: Path) -> List[Dict[str, Any]]:
     gm = repo_root / ".gitmodules"
     if not gm.exists():
@@ -180,10 +227,13 @@ def get_submodules(repo_root: Path) -> List[Dict[str, Any]]:
     for section in config.sections():
         if section.startswith("submodule"):
             name = section.replace("submodule ", "").strip('"')
+            raw_url = config.get(section, "url", fallback="")
+            url = resolve_submodule_url(raw_url)
             submodules.append({
                 "name": name,
                 "path": config.get(section, "path", fallback=""),
-                "url": config.get(section, "url", fallback=""),
+                "url": url,
+                "raw_url": raw_url,
                 "branch": config.get(section, "branch", fallback="main"),
             })
     return submodules
@@ -349,6 +399,11 @@ def health_check(repo_root: Path, submodules: List[Dict[str, Any]]) -> bool:
     log("INFO", "=== HEALTH CHECK ===")
     all_ok = True
 
+    github_user = resolve_github_user()
+    if not github_user:
+        log("WARN", "GitHub user not configured. Set 'github_user' in sync profile.")
+        log("WARN", f"  Profile: {PROFILE_PATH}")
+
     for sub in submodules:
         full = repo_root / sub["path"]
         log("INFO", f"--- {sub['name']} ---")
@@ -358,11 +413,13 @@ def health_check(repo_root: Path, submodules: List[Dict[str, Any]]) -> bool:
             all_ok = False
             continue
 
-        # Check remote reachable
-        rc, _, err = run(["git", "ls-remote", "--heads", "origin", sub["branch"]],
+        # Check remote reachable with resolved URL
+        resolved_url = resolve_submodule_url(sub.get("raw_url", sub["url"]))
+        rc, _, err = run(["git", "ls-remote", "--heads", resolved_url, sub["branch"]],
                         full, silent=True, timeout=15)
         if rc != 0:
             log("ERROR", f"  Remote unreachable: {err}")
+            log("ERROR", f"  URL: {sub.get('raw_url', sub['url'])}")
             all_ok = False
         else:
             log("OK", f"  Remote reachable")
@@ -370,7 +427,7 @@ def health_check(repo_root: Path, submodules: List[Dict[str, Any]]) -> bool:
         # Check URL matches .gitmodules
         rc, out, _ = run(["git", "remote", "get-url", "origin"], full, silent=True)
         actual_url = out.strip()
-        expected_url = sub["url"]
+        expected_url = resolved_url
         if actual_url != expected_url:
             log("WARN", f"  URL mismatch: expected {expected_url}, got {actual_url}")
         else:
@@ -670,10 +727,22 @@ def ensure_all_prerequisites(repo_root: Path) -> bool:
 # SYNC OPERATIONS
 # =============================================================================
 
+def configure_submodule_urls(repo_root: Path, submodules: List[Dict[str, Any]]) -> None:
+    """Set resolved URLs in local git config (does not modify .gitmodules file)."""
+    for sub in submodules:
+        resolved_url = resolve_submodule_url(sub.get("raw_url", sub["url"]))
+        if resolved_url != sub.get("raw_url", sub["url"]):
+            run(["git", "config", f"submodule.{sub['path']}.url", resolved_url],
+                repo_root, silent=True)
+
+
 def init_submodules(repo_root: Path, submodules: List[Dict[str, Any]],
                     selected: Optional[List[str]] = None) -> bool:
     log("INFO", "=== INIT SUBMODULES ===")
     targets = [s for s in submodules if selected is None or s["name"] in selected]
+
+    # Configure resolved URLs in local git config before init
+    configure_submodule_urls(repo_root, targets)
 
     rc, _, _ = run(["git", "submodule", "update", "--init", "--recursive"],
                    repo_root, check=False)
@@ -681,6 +750,24 @@ def init_submodules(repo_root: Path, submodules: List[Dict[str, Any]],
         log("OK", "Submodules initialized")
     else:
         log("ERROR", "Submodule init failed")
+        # Try manual clone for each missing submodule
+        for sub in targets:
+            full = repo_root / sub["path"]
+            if (full / ".git").exists():
+                continue
+            resolved_url = resolve_submodule_url(sub.get("raw_url", sub["url"]))
+            log("INFO", f"Manual clone: {sub['name']} from {resolved_url}")
+            parent = full.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            rc2, _, err2 = run(["git", "clone", "--branch", sub["branch"],
+                                resolved_url, str(full)],
+                               parent, check=False, timeout=120)
+            if rc2 != 0:
+                log("ERROR", f"  Clone failed: {err2}")
+                log("ERROR", f"  Check that repo exists at: {sub.get('raw_url', sub['url'])}")
+                log("ERROR", f"  And that github_user is set correctly in profile")
+            else:
+                log("OK", f"  {sub['name']}: cloned successfully")
         return False
 
     for sub in targets:
@@ -727,6 +814,8 @@ def github_to_local(repo_root: Path, submodules: List[Dict[str, Any]],
         return False
 
     log("INFO", "Updating submodules to new meta-repo pointers...")
+    targets = [s for s in submodules if selected is None or s["name"] in selected]
+    configure_submodule_urls(repo_root, targets)
     rc, out, err = run(
         ["git", "submodule", "update", "--init", "--recursive"],
         repo_root, check=False)
