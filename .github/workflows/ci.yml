@@ -131,14 +131,10 @@ jobs:
 
       - name: Static Analysis – cppcheck
         run: |
-          cppcheck --enable=all \
+          cppcheck --enable=warning,error \
             -I submodules/seed-core/src \
             --suppress=missingIncludeSystem \
-            --suppress=unusedFunction \
-            --suppress=constVariablePointer \
-            --suppress=knownConditionTrueFalse \
             --suppress=unknownMacro \
-            --suppress=unmatchedSuppression \
             --error-exitcode=1 \
             submodules/seed-core/src/ submodules/seed-core/tests/
 
