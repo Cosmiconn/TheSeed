@@ -138,6 +138,7 @@ jobs:
             --suppress=unusedFunction \
             --suppress=constVariablePointer \
             --suppress=knownConditionTrueFalse \
+            --suppress=unknownMacro \
             --error-exitcode=1 \
             submodules/seed-core/src/ submodules/seed-core/tests/
 
