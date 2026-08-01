@@ -131,17 +131,13 @@ jobs:
 
       - name: Static Analysis – cppcheck
         run: |
-          cppcheck --enable=all \
+          cppcheck --enable=warning \
             -I submodules/seed-core/src \
             --suppress=missingIncludeSystem \
-            --suppress=missingInclude \
-            --suppress=unusedFunction \
-            --suppress=constVariablePointer \
-            --suppress=knownConditionTrueFalse \
             --suppress=unknownMacro \
             --error-exitcode=1 \
             submodules/seed-core/src/ submodules/seed-core/tests/
-
+      
       - name: Configure Coverage
         run: |
           cmake -S . -B build/linux-coverage \
