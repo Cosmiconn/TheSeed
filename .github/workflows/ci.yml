@@ -131,7 +131,7 @@ jobs:
 
       - name: Static Analysis – cppcheck
         run: |
-          cppcheck --enable=warning,error \
+          cppcheck --enable=warning \
             -I submodules/seed-core/src \
             --suppress=missingIncludeSystem \
             --suppress=unknownMacro \
