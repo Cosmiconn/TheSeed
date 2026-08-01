@@ -134,11 +134,11 @@ jobs:
           cppcheck --enable=all \
             -I submodules/seed-core/src \
             --suppress=missingIncludeSystem \
-            --suppress=missingInclude \
             --suppress=unusedFunction \
             --suppress=constVariablePointer \
             --suppress=knownConditionTrueFalse \
             --suppress=unknownMacro \
+            --suppress=unmatchedSuppression \
             --error-exitcode=1 \
             submodules/seed-core/src/ submodules/seed-core/tests/
 
