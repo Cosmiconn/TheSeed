@@ -137,7 +137,7 @@ jobs:
             --suppress=unknownMacro \
             --error-exitcode=1 \
             submodules/seed-core/src/ submodules/seed-core/tests/
-
+      
       - name: Configure Coverage
         run: |
           cmake -S . -B build/linux-coverage \
