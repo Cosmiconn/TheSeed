@@ -48,13 +48,13 @@ function(seed_generate_coverage_report)
     COMMAND ${LCOV_PROGRAM} --directory ${CMAKE_BINARY_DIR} --capture --output-file ${COVERAGE_INFO} --ignore-errors negative
     # Remove external / system headers
     COMMAND ${LCOV_PROGRAM} --remove ${COVERAGE_INFO}
-      '/usr/*'
-      '${CMAKE_BINARY_DIR}/*'
-      '${CMAKE_SOURCE_DIR}/submodules/seed-core/tests/*'
-      '${CMAKE_SOURCE_DIR}/tests/*'
-      '${CMAKE_SOURCE_DIR}/vcpkg/*'
+      /usr/*
+      ${CMAKE_BINARY_DIR}/*
+      ${CMAKE_SOURCE_DIR}/submodules/seed-core/tests/*
+      ${CMAKE_SOURCE_DIR}/tests/*
+      ${CMAKE_SOURCE_DIR}/vcpkg/*
       --output-file ${COVERAGE_INFO}.filtered
-      --ignore-errors negative
+      --ignore-errors negative,unused
     # Generate HTML report
     COMMAND ${GENHTML_PROGRAM} ${COVERAGE_INFO}.filtered
       --output-directory ${COVERAGE_DIR}/html
