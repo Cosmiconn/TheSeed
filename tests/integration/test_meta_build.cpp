@@ -1,10 +1,13 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <seed/memory.h>
 #include <seed/ecs.h>
@@ -108,4 +111,33 @@ TEST_CASE("MetaBuild_Scripts_Exist") {
 
     std::ifstream setup_sh(kProjectRoot / "scripts/setup.sh");
     REQUIRE(setup_sh.good());
+}
+
+// ============================================================================
+// Stress Tests (werden von CI x10 wiederholt)
+// ============================================================================
+
+TEST_CASE("Integration_MultiThreadStress") {
+    seed::jobs::JobSystem js;
+    constexpr uint32_t kNumTasks = 10'000;
+    std::atomic<uint32_t> counter{0};
+
+    for (uint32_t i = 0; i < kNumTasks; ++i) {
+        js.schedule([&]() { counter.fetch_add(1, std::memory_order_relaxed); });
+    }
+    js.waitForAll();
+
+    REQUIRE(counter == kNumTasks);
+}
+
+TEST_CASE("Integration_100kEntities_Stress") {
+    seed::memory::BlockAllocator blockAlloc(256 * 1024 * 1024);
+    seed::ecs::World world(&blockAlloc);
+
+    for (int i = 0; i < 100'000; ++i) {
+        auto e = world.createEntity();
+        (void)e;
+    }
+
+    REQUIRE(world.entityCount() == 100'000);
 }
