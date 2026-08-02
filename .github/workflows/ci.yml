@@ -21,7 +21,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck
+          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck lcov
 
       - name: Clone vcpkg
         run: |
