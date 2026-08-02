@@ -39,7 +39,7 @@ function(seed_generate_coverage_report)
     # Zero counters
     COMMAND ${LCOV_PROGRAM} --directory ${CMAKE_BINARY_DIR} --zerocounters
     # Run tests
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -E seed_gate_perf_tests
     # Capture coverage data
     COMMAND ${LCOV_PROGRAM} --directory ${CMAKE_BINARY_DIR} --capture --output-file ${COVERAGE_INFO}
     # Remove external / system headers
