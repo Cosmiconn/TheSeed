@@ -20,7 +20,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck valgrind
+          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck valgrind lcov
 
       - name: Clone vcpkg
         run: |
@@ -126,6 +126,34 @@ jobs:
             echo "Valgrind found memory errors. Failing build."
             exit 1
           fi
+
+      - name: Configure Coverage
+        run: |
+          cmake -S . -B build/linux-coverage \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DSEED_ENABLE_COVERAGE=ON \
+            -DSEED_ENABLE_SANITIZERS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build Coverage
+        run: cmake --build build/linux-coverage --parallel
+
+      - name: Generate Coverage Report
+        run: |
+          cd build/linux-coverage
+          cmake --build . --target coverage-report
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/linux-coverage/coverage/coverage.info.filtered
+          fail_ci_if_error: true
+          verbose: true
 
       - name: Static Analysis – clang-tidy
         run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/
