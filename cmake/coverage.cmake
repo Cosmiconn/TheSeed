@@ -13,8 +13,8 @@ function(seed_apply_coverage target)
     return()
   endif()
 
-  target_compile_options(${target} PRIVATE --coverage -O0 -g)
-  target_link_options(${target} PRIVATE --coverage)
+  target_compile_options(${target} PUBLIC --coverage -O0 -g)
+  target_link_options(${target} PUBLIC --coverage)
   message(STATUS "Coverage enabled: ${target}")
 endfunction()
 
