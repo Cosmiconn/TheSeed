@@ -156,7 +156,18 @@ jobs:
           verbose: true
 
       - name: Static Analysis – clang-tidy
-        run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/
+        run: |
+          cmake -S . -B build/clang-tidy \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          run-clang-tidy -p build/clang-tidy submodules/seed-core/src/ submodules/seed-core/tests/
+
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
