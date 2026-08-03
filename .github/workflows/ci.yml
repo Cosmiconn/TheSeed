@@ -21,7 +21,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck
+          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck lcov
 
       - name: Clone vcpkg
         run: |
@@ -127,7 +127,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-linux \
             -DBUILD_TESTING=ON \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-          run-clang-tidy -p build/clang-tidy submodules/seed-core/src/ submodules/seed-core/tests/
+          run-clang-tidy -p build/clang-tidy submodules/seed-core/src/ submodules/seed-core/tests/ submodules/seed-network/src/ submodules/seed-network/tests/
 
       - name: Static Analysis – cppcheck
         run: |
@@ -136,8 +136,8 @@ jobs:
             --suppress=missingIncludeSystem \
             --suppress=unknownMacro \
             --error-exitcode=1 \
-            submodules/seed-core/src/ submodules/seed-core/tests/
-      
+            submodules/seed-core/src/ submodules/seed-core/tests/ submodules/seed-network/src/ submodules/seed-network/tests/
+
       - name: Configure Coverage
         run: |
           cmake -S . -B build/linux-coverage \
@@ -161,8 +161,9 @@ jobs:
       - name: Upload Coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: build/linux-coverage/coverage/coverage.info.filtered
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           verbose: true
 
   build-windows:

@@ -56,6 +56,7 @@ endif()
 
 # Submodule-Builds
 add_subdirectory(submodules/seed-core)
+add_subdirectory(submodules/seed-network)
 
 # Meta-level tests
 if(SEED_BUILD_TESTS)

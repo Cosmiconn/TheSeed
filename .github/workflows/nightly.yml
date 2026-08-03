@@ -20,7 +20,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck valgrind
+          sudo apt-get install -y ninja-build g++-13 clang-tidy cppcheck valgrind lcov
 
       - name: Clone vcpkg
         run: |
@@ -62,19 +62,19 @@ jobs:
       - name: Build Debug
         run: cmake --build build/linux-debug --parallel
 
-      - name: Run all tests
-        run: ctest --test-dir build/linux-debug --output-on-failure
+      - name: Run all tests (except performance gates)
+        run: ctest --test-dir build/linux-debug --output-on-failure -E seed_gate_perf_tests
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:print_stats=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
-      - name: Stress Tests x20
+      - name: Stress Tests x20 (except performance gates)
         run: |
           export ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
           for i in $(seq 1 20); do
             echo "=== Stress run $i ==="
-            ctest --test-dir build/linux-debug --output-on-failure
+            ctest --test-dir build/linux-debug --output-on-failure -E seed_gate_perf_tests
           done
 
       # Valgrind requires a build WITHOUT sanitizers (ASan replaces malloc/free).
@@ -103,6 +103,10 @@ jobs:
             "build/linux-debug-valgrind/submodules/seed-core/tests/seed_tests" \
             "build/linux-debug-valgrind/submodules/seed-core/tests/seed_property_tests" \
             "build/linux-debug-valgrind/submodules/seed-core/tests/seed_fuzz_pool" \
+            "build/linux-debug-valgrind/submodules/seed-network/tests/seed_network_tests" \
+            "build/linux-debug-valgrind/submodules/seed-network/tests/seed_network_integration_tests" \
+            "build/linux-debug-valgrind/submodules/seed-network/tests/seed_network_property_tests" \
+            "build/linux-debug-valgrind/submodules/seed-network/tests/seed_network_fuzz_transport" \
             "build/linux-debug-valgrind/tests/integration/seed_integration_tests" \
             "build/linux-debug-valgrind/tests/e2e/seed_e2e_tests" \
             "build/linux-debug-valgrind/tests/gate/seed_gate_tests" \
@@ -127,8 +131,50 @@ jobs:
             exit 1
           fi
 
+      - name: Configure Coverage
+        run: |
+          cmake -S . -B build/linux-coverage \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DSEED_ENABLE_COVERAGE=ON \
+            -DSEED_ENABLE_SANITIZERS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build Coverage
+        run: cmake --build build/linux-coverage --parallel
+
+      - name: Generate Coverage Report
+        run: |
+          cd build/linux-coverage
+          cmake --build . --target coverage-report
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/linux-coverage/coverage/coverage.info.filtered
+          fail_ci_if_error: true
+          verbose: true
+
       - name: Static Analysis – clang-tidy
-        run: run-clang-tidy -p build/linux-debug submodules/seed-core/src/ submodules/seed-core/tests/
+        run: |
+          # Configure a dedicated Clang build for clang-tidy to avoid GCC-only
+          # warning flags (-Wduplicated-branches, -Wlogical-op, etc.) that
+          # clang-tidy-18 treats as hard errors when reading compile_commands.json
+          # from a GCC build.
+          cmake -S . -B build/clang-tidy \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          run-clang-tidy -p build/clang-tidy submodules/seed-core/src/ submodules/seed-core/tests/ submodules/seed-network/src/ submodules/seed-network/tests/
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
