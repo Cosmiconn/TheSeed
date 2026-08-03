@@ -14,6 +14,10 @@ function(seed_apply_coverage target)
   endif()
 
   target_compile_options(${target} PUBLIC --coverage -O0 -g)
+  # Atomic profile update prevents negative hit counts in multithreaded tests
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(${target} PUBLIC -fprofile-update=atomic)
+  endif()
   target_link_options(${target} PUBLIC --coverage)
   message(STATUS "Coverage enabled: ${target}")
 endfunction()
@@ -39,17 +43,18 @@ function(seed_generate_coverage_report)
     # Zero counters
     COMMAND ${LCOV_PROGRAM} --directory ${CMAKE_BINARY_DIR} --zerocounters
     # Run tests
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -E seed_gate_perf_tests
     # Capture coverage data
-    COMMAND ${LCOV_PROGRAM} --directory ${CMAKE_BINARY_DIR} --capture --output-file ${COVERAGE_INFO}
+    COMMAND ${LCOV_PROGRAM} --directory ${CMAKE_BINARY_DIR} --capture --output-file ${COVERAGE_INFO} --ignore-errors negative
     # Remove external / system headers
     COMMAND ${LCOV_PROGRAM} --remove ${COVERAGE_INFO}
-      '/usr/*'
-      '${CMAKE_BINARY_DIR}/*'
-      '${CMAKE_SOURCE_DIR}/submodules/seed-core/tests/*'
-      '${CMAKE_SOURCE_DIR}/tests/*'
-      '${CMAKE_SOURCE_DIR}/vcpkg/*'
+      /usr/*
+      ${CMAKE_BINARY_DIR}/*
+      ${CMAKE_SOURCE_DIR}/submodules/seed-core/tests/*
+      ${CMAKE_SOURCE_DIR}/tests/*
+      ${CMAKE_SOURCE_DIR}/vcpkg/*
       --output-file ${COVERAGE_INFO}.filtered
+      --ignore-errors negative,unused
     # Generate HTML report
     COMMAND ${GENHTML_PROGRAM} ${COVERAGE_INFO}.filtered
       --output-directory ${COVERAGE_DIR}/html

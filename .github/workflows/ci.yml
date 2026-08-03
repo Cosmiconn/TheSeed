@@ -136,7 +136,11 @@ jobs:
             --suppress=missingIncludeSystem \
             --suppress=unknownMacro \
             --error-exitcode=1 \
+<<<<<<< HEAD
             submodules/seed-core/src/ submodules/seed-core/tests/ submodules/seed-network/src/ submodules/seed-network/tests/
+=======
+            submodules/seed-core/src/ submodules/seed-core/tests/
+>>>>>>> 4879f03ffc3a7e20612c520cf93ff6b047ea63ec
 
       - name: Configure Coverage
         run: |

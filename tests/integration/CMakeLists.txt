@@ -16,3 +16,9 @@ if(SEED_ENABLE_SANITIZERS)
 endif()
 
 add_test(NAME seed_integration_tests COMMAND $<TARGET_FILE:seed_integration_tests>)
+
+# Individual stress-test cases (addressable by ctest -R for CI repetition)
+add_test(NAME Integration_MultiThreadStress
+         COMMAND $<TARGET_FILE:seed_integration_tests> -tc="Integration_MultiThreadStress")
+add_test(NAME Integration_100kEntities_Stress
+         COMMAND $<TARGET_FILE:seed_integration_tests> -tc="Integration_100kEntities_Stress")
