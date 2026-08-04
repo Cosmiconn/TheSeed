@@ -71,6 +71,55 @@ TheSeed/
 #include <seed/profiling.h>      // SEED_ASSERT, Tracy macros
 ```
 
+## Submodule: seed-network
+
+### Subsystems
+
+| Module | Path | Status |
+|--------|------|--------|
+| Socket | `src/network/socket.h/.cpp` | ✅ Complete (M7) |
+| Packet Header | `src/network/packet_header.h/.cpp` | ✅ Complete (M7) |
+| ReliableChannel | `src/network/reliable_channel.h/.cpp` | ✅ Complete (M7) |
+| Fragmenter | `src/network/fragmenter.h/.cpp` | ✅ Complete (M7) |
+| Transport | `src/network/transport.h/.cpp` | ✅ Complete (M7) |
+| ReplicationSystem | `src/network/replication_system.h/.cpp` | ⏳ Planned (M8) |
+| InterestManagement | `src/network/interest_management.h/.cpp` | ⏳ Planned (M8) |
+| PredictionSystem | `src/network/prediction_system.h/.cpp` | ⏳ Planned (M9) |
+| LagCompensation | `src/network/lag_compensation.h/.cpp` | ⏳ Planned (M10) |
+| GameServer | `src/network/game_server.h/.cpp` | ⏳ Planned (M11) |
+| SecurityManager | `src/network/security_manager.h/.cpp` | ⏳ Planned (M12) |
+
+### Architecture
+
+```
+[Application]
+     |
+     v
+[Transport] --reliable/unreliable--> [UDPSocket] --> UDP
+     |
+     +-- [ReliableChannel] --ACK-based--> ordered delivery
+     +-- [Fragmenter] --MTU 1200--> reassembly
+```
+
+### Public API
+
+```cpp
+#include <seed/network/transport.h>        // Transport, TransportConfig
+#include <seed/network/socket.h>           // UDPSocket, SocketAddress
+#include <seed/network/reliable_channel.h> // ReliableChannel
+#include <seed/network/fragmenter.h>       // Fragmenter
+#include <seed/network/packet_header.h>    // PacketHeader
+```
+
+### Threading Model
+
+- **Network Thread:** Non-blocking `recvfrom()` loop (100us sleep), ACK processing, incoming queueing
+- **Main/Game Thread:** `update(deltaTime)` – outgoing send, resend, heartbeat, `receive()` – dequeue
+
+See `docs/NETWORK.md` for full protocol specification.
+
+---
+
 ## Design Principles
 
 1. **No raw new/delete** in game code – always use seed allocators
