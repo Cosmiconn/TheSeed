@@ -1,6 +1,7 @@
 # Gate Tests – Funktional (blockieren CI)
 add_executable(seed_gate_tests
     test_gate_p0.cpp
+    test_gate_p0_diagnostics.cpp
 )
 target_link_libraries(seed_gate_tests PRIVATE seed_core)
 seed_apply_warnings(seed_gate_tests)

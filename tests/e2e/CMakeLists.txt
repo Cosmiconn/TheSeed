@@ -5,6 +5,7 @@ find_package(doctest CONFIG REQUIRED)
 
 add_executable(seed_e2e_tests
     test_smoke.cpp
+    test_e2e_diagnostics.cpp
 )
 
 target_link_libraries(seed_e2e_tests PRIVATE seed_core doctest::doctest)
